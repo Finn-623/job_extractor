@@ -1,0 +1,74 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Pytest / coverage
+.pytest_cache/
+.pytest-*/
+.pytest*/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Runtime artifacts
+.step35/
+.step36/
+.step37/
+.step38/
+.step39/
+.step40/
+.step41/
+.step42/
+.step43/
+.step44/
+.step45/
+.step46/
+
+# Generated reports / output
+output/
+outputs/
+artifacts/
+
+# Excel temporary files
+~$*.xlsx
+
+# Playwright/browser cache
+.playwright/
+
+# Local database / runtime storage
+*.sqlite
+*.sqlite3
+
+# Project reconstruction snapshots
+job_extractor_canonical_reconstructed_*/
+job_extractor_step*_ready_*/
+
+# Historical step artifacts
+.step*/
+.test-runs/
+.step*_full_before.txt

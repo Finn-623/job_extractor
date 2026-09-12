@@ -1,0 +1,1 @@
+﻿from job_extractor.exporters.json_exporter import export_collection_result
