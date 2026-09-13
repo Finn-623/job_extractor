@@ -12,6 +12,7 @@ from job_extractor.collectors.generic_detail import GenericHtmlDetailCollector,G
 from job_extractor.discovery.dom_semantics import credible_jd
 from job_extractor.discovery.dynamic import graphql_next_values,pagination_stop
 from job_extractor.identity import job_identity
+from job_extractor.planning.execution_contract import PlanContractError,transport_gaps
 
 ID_FIELDS=("id","job_id","jobId","jobPostId","positionId","requisitionId","requisition_id")
 TITLE_FIELDS=("title","name","jobTitle","positionName")
@@ -114,6 +115,11 @@ class GenericHttpCollector:
             full_jd=full,detail_url=detail if isinstance(detail,str) else None,apply_url=detail if isinstance(detail,str) else None,
             source_url=self.plan.source_url,raw_data={**safe_business_data(raw),"_identity":identity})
     def collect(self)->CollectionResult:
+        gaps=transport_gaps(self.plan)
+        if gaps:
+            from job_extractor.planning.execution_contract import GAP_REASONS
+            missing=[GAP_REASONS.get(gap,f"MISSING_{gap}") for gap in gaps]
+            raise PlanContractError(f"COLLECTION_CONTRACT_VIOLATION gaps={','.join(missing)}",execution_mode=self.plan.mode,missing_fields=missing)
         started=datetime.now();clock=perf_counter();errors=[];raws=[];values=dict(self.plan.initial_values);seen_cursors=set();expected=None
         try:
             for _ in range(self.max_pages):

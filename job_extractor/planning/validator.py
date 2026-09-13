@@ -3,6 +3,7 @@ from urllib.parse import urlsplit
 from job_extractor.discovery.network_analyzer import sensitive
 from job_extractor.discovery.network_analyzer import get_path
 from job_extractor.planning.models import CollectionPlan,PlanValidation
+from job_extractor.planning.execution_contract import missing_fields
 
 def _secret(value,path=""):
     if isinstance(value,dict):
@@ -26,6 +27,7 @@ class CollectionPlanValidator:
             if plan.pagination_type=="OFFSET" and (not plan.offset_param or not plan.page_size_param):errors.append("OFFSET_PARAMS_MISSING")
             if plan.pagination_type=="OFFSET" and (plan.offset_param not in plan.initial_values and plan.offset_param not in plan.query_values or plan.page_size_param not in plan.initial_values and plan.page_size_param not in plan.query_values):errors.append("OFFSET_INITIAL_VALUES_MISSING")
             if plan.pagination_type=="CURSOR" and not plan.cursor_param:errors.append("CURSOR_PARAM_MISSING")
+            if plan.pagination_type in ("PAGE","OFFSET") and not (plan.total_field or plan.has_more_field):errors.append("TERMINATION_STRATEGY_MISSING")
             if plan.pagination_type in ("GRAPHQL_PAGE","GRAPHQL_OFFSET","GRAPHQL_CURSOR"):
                 if not plan.page_param or get_path(plan.initial_values,plan.page_param) is None:errors.append("GRAPHQL_PAGINATION_INITIAL_VALUE_MISSING")
             if plan.pagination_type=="GRAPHQL_CURSOR" and (not plan.next_cursor_field or not plan.has_more_field):errors.append("GRAPHQL_CURSOR_PATHS_MISSING")

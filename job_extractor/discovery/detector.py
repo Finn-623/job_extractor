@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
 from typing import Any
-from urllib.parse import urljoin,urlsplit
+from urllib.parse import parse_qsl,urljoin,urlsplit
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from job_extractor.browser import BrowserRuntime,BrowserRuntimeError
 from job_extractor.discovery.models import ApiCandidate,CandidateSource,DiscoveryResult,ListContainer,NetworkSummary,PaginationDetection,RejectedCandidate,VisibleTotalEvidence,ProvenanceRecord,TerminalActivationTrace,RecruitmentAction
 from job_extractor.discovery.network_analyzer import request_shape,response_shape,safe_url,sanitized_values,find_field,get_path,list_observation,safe_business_data
-from job_extractor.discovery.scorer import confidence,score_detail,score_list
+from job_extractor.discovery.pagination_semantics import infer_pagination_from_schema
+from job_extractor.discovery.scorer import confidence,reliable_list_candidate,score_detail,score_list
 from job_extractor.discovery.dom_semantics import extract_company,extract_detail_dom,filter_detail_links,first_real_url,related_detail_hosts,repeated_job_cards,repeated_job_links,route_changed,semantic_html_detail
 from job_extractor.discovery.dynamic import graphql_shape,is_pagination_control,navigation_trust,safe_graphql_body,serialized_states,visible_total_evidence,wait_for_dynamic_jd,wait_for_hydration,wait_for_readiness_consensus
 from job_extractor.discovery.sources import embedded_sources,recruitment_entries,select_terminal_actions,spa_action_inventory,classify_request,rank_spa_action
@@ -67,8 +68,14 @@ class GenericApiDetector:
     def _body(request)->dict[str,Any]:
         try:
             value=request.post_data_json
-            return value if isinstance(value,dict) else {}
-        except Exception:return {}
+            if isinstance(value,dict):return value
+        except Exception:pass
+        try:
+            raw=request.post_data
+            if raw and "application/x-www-form-urlencoded" in (request.headers.get("content-type") or "").lower():
+                return {k:v for k,v in parse_qsl(raw,keep_blank_values=True)}
+        except Exception:pass
+        return {}
     @staticmethod
     def _blocked(text:str)->bool:
         value=text.lower()
@@ -96,22 +103,35 @@ class GenericApiDetector:
         return scope
     @staticmethod
     def _pagination(observations:list[_Observation],candidate:ApiCandidate|None)->PaginationDetection:
-        if not candidate:return PaginationDetection()
+        if not candidate or candidate.rejection_reasons:return PaginationDetection()
         relevant=[o for o in observations if safe_url(o.url)[0]==candidate.url and o.method==candidate.method]
         keys={str(k).lower():str(k) for o in relevant for source in (o.body,o.query) for k in source}
         result=PaginationDetection(total_field=candidate.response_shape.get("total_field"))
         gql_type=candidate.response_shape.get("pagination_type")
         if gql_type:
             return PaginationDetection(pagination_type=gql_type,page_param=candidate.response_shape.get("page_param"),page_size_param=candidate.response_shape.get("page_size_param"),cursor_param=candidate.response_shape.get("page_param") if gql_type=="GRAPHQL_CURSOR" else None,total_field=candidate.response_shape.get("total_field"),next_cursor_field=candidate.response_shape.get("next_cursor_field"),has_more_field=candidate.response_shape.get("has_more_field"))
-        for name in ("offset",):
-            if name in keys:result.pagination_type="OFFSET";result.page_param=keys[name];break
+        # Schema-based inference from the observed request (body/query) and response, even for a single first-page capture.
+        if relevant:
+            observation=relevant[0]
+            inferred=infer_pagination_from_schema(request_body=observation.body if isinstance(observation.body,dict) else {},
+                query=observation.query,response=observation.payload,list_length=candidate.observed_list_length)
+            if inferred.get("kind"):
+                result.pagination_type=inferred["kind"];result.page_param=inferred["page_param"];result.page_size_param=inferred["size_param"]
+                result.first_page=inferred["first_page"];result.page_size=inferred["page_size"]
+                if inferred.get("total_path"):result.total_field=inferred["total_path"]
+                result.inference_source=inferred["inference_source"];result.confidence=inferred["confidence"];result.evidence=inferred["evidence"]
+        if result.pagination_type=="UNKNOWN":
+            for name in ("offset",):
+                if name in keys:result.pagination_type="OFFSET";result.page_param=keys[name];break
         if result.pagination_type=="UNKNOWN":
             for name in ("page","pageindex","pageno","current"):
                 if name in keys:result.pagination_type="PAGE";result.page_param=keys[name];break
-        for name in ("cursor","nextcursor","next_cursor"):
-            if name in keys:result.pagination_type="CURSOR";result.cursor_param=keys[name];break
-        for name in ("limit","pagesize","page_size","size"):
-            if name in keys:result.page_size_param=keys[name];break
+        if result.pagination_type=="UNKNOWN":
+            for name in ("cursor","nextcursor","next_cursor"):
+                if name in keys:result.pagination_type="CURSOR";result.cursor_param=keys[name];break
+        if result.page_size_param is None:
+            for name in ("limit","pagesize","page_size","size"):
+                if name in keys:result.page_size_param=keys[name];break
         if len(relevant)>1:
             a={**relevant[0].query,**relevant[0].body}; b={**relevant[-1].query,**relevant[-1].body}
             changes=[f"{k}: {a[k]} -> {b[k]}" for k in a.keys()&b.keys() if a[k]!=b[k] and not any(x in k.lower() for x in ("token","key","signature","csrf","session"))]
@@ -183,6 +203,9 @@ class GenericApiDetector:
             if key not in grouped or candidate.score>grouped[key].score:grouped[key]=candidate
         for key,value in grouped.items():value.sample_count=counts[key]
         return sorted((x for x in grouped.values() if x.score>0 and not x.rejection_reasons),key=lambda x:(-x.score,x.url,x.method))
+    @classmethod
+    def _reliable_list_source(cls,candidate:ApiCandidate|None)->bool:
+        return reliable_list_candidate(candidate)
     def discover(self,url:str,budget=None,terminal_mode:bool=False,upstream_entry_action:RecruitmentAction|None=None)->DiscoveryResult:
         started=datetime.now(); clock=perf_counter(); observations=[]; phase=["TERMINAL_INITIAL" if terminal_mode else "INITIAL"]; summary=NetworkSummary(); dom={};detail_dom={};warnings=[];company=None;pagination_override=None;inventory=[];total_evidence=[];total_conflict=False;entries=[]
         terminal_trace=TerminalActivationTrace(terminal_url=url,scope="UNKNOWN",activation_started_at=started,upstream_entry_action=upstream_entry_action) if terminal_mode else None
@@ -289,6 +312,14 @@ class GenericApiDetector:
                     if triggered:
                         page.wait_for_timeout(2000)
                         initial_rank=self._rank(observations);initial_probable=initial_rank[0] if initial_rank and initial_rank[0].score>=self.threshold else None
+                internal_trace=[]
+                if not initial_probable and not _expired():
+                    from job_extractor.discovery.internal_navigation import run_internal_job_navigation
+                    def _rank_now():
+                        ranked=self._rank([o for o in observations if o.phase!="DETAIL"])
+                        reliable=next((candidate for candidate in ranked if self._reliable_list_source(candidate)),None)
+                        return (reliable,reliable.score) if reliable else (None,0)
+                    initial_probable,internal_trace=run_internal_job_navigation(page,url,observations,rank_fn=_rank_now,deadline_check=_expired)
                 links=page.locator('a[href]'); hrefs=[]
                 for i in range(min(links.count(),1000)):
                     href=links.nth(i).get_attribute("href") or ""; label=(links.nth(i).inner_text() or "").strip()
@@ -464,6 +495,7 @@ class GenericApiDetector:
             detected_pagination=pagination,detected_scope=self._scope(url,observations,text if 'text' in locals() else ""),network_summary=summary,dom_fallback=dom,detail_dom=detail_dom,company=company,tool_version=__version__,warnings=warnings,
             source_inventory=inventory,visible_total_evidence=[VisibleTotalEvidence(**x) for x in total_evidence],visible_total_conflict=total_conflict,
             list_containers=[container] if 'container' in locals() and container else [],page_type=page_type,recruitment_entries=entries,ats_classification=classification,ats_profile=profile,runtime_source=runtime_source,
+            internal_navigation_trace=internal_trace,
             started_at=started,finished_at=datetime.now(),elapsed_seconds=perf_counter()-clock)
         if _expired():
             if "SOURCE_DISCOVERY_TIMEOUT" not in result.warnings:result.warnings.append("SOURCE_DISCOVERY_TIMEOUT")

@@ -340,6 +340,11 @@ class PaginationDetection(BaseModel):
     next_cursor_field: str|None = None
     has_more_field: str|None = None
     observed_change: str|None = None
+    inference_source: str|None = None
+    confidence: float|None = None
+    evidence: list[str] = Field(default_factory=list)
+    first_page: int|None = None
+    page_size: int|None = None
 
 class NetworkSummary(BaseModel):
     observed_requests: int = 0
@@ -366,6 +371,7 @@ class DiscoveryResult(BaseModel):
     source_inventory: list[CandidateSource] = Field(default_factory=list)
     page_type: Literal["JOB_LIST","JOB_DETAIL","RECRUITMENT_PORTAL","CAMPAIGN_PAGE","ATS_EMBED","UNKNOWN"] = "UNKNOWN"
     recruitment_entries: list[RecruitmentEntry] = Field(default_factory=list)
+    internal_navigation_trace: list[dict[str,Any]] = Field(default_factory=list)
     handoff: HandoffProvenance|None = None
     ats_classification: Literal["KNOWN_ATS","UNKNOWN_ATS","DIRECT_JOB_SITE","RECRUITMENT_PORTAL","NON_JOB_DESTINATION"] = "NON_JOB_DESTINATION"
     ats_profile: ATSProfile|None = None

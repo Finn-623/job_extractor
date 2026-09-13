@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import Counter
 from typing import Any
-from job_extractor.discovery.network_analyzer import find_array_info,find_field,response_shape
+from job_extractor.discovery.network_analyzer import TOTAL_TIER1,TOTAL_TIER2,find_array_info,find_field,response_shape
 
 TITLE={"title","jobtitle","job_title","jobname","positionname","position_name","projectpositionname","name"}
 IDS={"id","jobid","job_id","jobcode","postid","post_id","postingid","posting_id","positionid","position_id","positioncode","requisitionid","requisition_id"}
@@ -9,6 +9,7 @@ LOCATION={"location","locations","city","cityname","city_name","country","workpl
 CATEGORY={"department","team","category","jobcategory","job_category","function","recruitcategoryname"}
 LINK={"url","absolute_url","job_url","joburl","detail_url","detailurl","apply_url","applyurl","path","slug"}
 JD={"description","overview","responsibility","responsibilities","requirement","requirements","qualification","qualifications","jobdescription","job_description"}
+REFERENCE={"code","key","value","label","dictcode","dict_code","optioncode","option_code","enum","enumcode","enum_code","categorycode","category_code","parentcode","parent_code","parentid","parent_id","children","childlist","displayorder","display_order","sortorder","sort_order","level"}
 
 def _fields(item:Any)->set[str]:return {str(k).lower() for k in item} if isinstance(item,dict) else set()
 def _job_prefixed(keys:set[str])->bool:
@@ -19,7 +20,7 @@ def _array_metrics(items:list[Any])->tuple[float,float,set[str]]:
     if not records:return 0.0,0.0,set()
     key_sets=[_fields(x) for x in records];modal=set(Counter(tuple(sorted(x)) for x in key_sets).most_common(1)[0][0])
     homogeneity=sum(len(keys&modal)/max(1,len(keys|modal)) for keys in key_sets)/len(key_sets)
-    density=sum(bool(keys&TITLE and keys&IDS and (keys&(LOCATION|CATEGORY|LINK|JD) or len(keys)>=4 or _job_prefixed(keys))) for keys in key_sets)/len(key_sets)
+    density=sum(bool(keys&TITLE and keys&IDS and (keys&(LOCATION|CATEGORY|LINK|JD) or _job_prefixed(keys))) for keys in key_sets)/len(key_sets)
     return round(homogeneity,4),round(density,4),set().union(*key_sets)
 
 def _negative_reasons(url:str,payload:Any,homogeneity:float,density:float,fields:set[str])->list[str]:
@@ -39,6 +40,10 @@ def _negative_reasons(url:str,payload:Any,homogeneity:float,density:float,fields
     region_semantic=fields&{"regioncode","regionname","provincename","provinceid","citycode","cityid","hotcity"}
     if not job_prefixed and not (fields&{"requirement","jobdescription","positionname","jobname","title"}):
         if dict_semantic or region_semantic or any(x in low for x in ("/region/","selectallvalidregions","/province/","/citylist","/arealist")):reasons.append("REGION_LIST")
+    generic_label=fields&{"name","label","value"};generic_identifier=fields&{"id","code","key","value"}
+    explicit_job_title=fields&(TITLE-{"name"});strong_job_context=fields&(JD|LINK|{"department","team","organization","workplace","postingdate","posteddate","employmenttype","recruittype"})
+    reference_shape=bool(generic_label and generic_identifier and not explicit_job_title and not _job_prefixed(fields))
+    if reference_shape and (fields&REFERENCE or not strong_job_context):reasons.append("REFERENCE_DATA_PAYLOAD")
     if homogeneity<0.55 and len(fields)>=4:reasons.append("MIXED_CONTENT_PAYLOAD")
     if density<0.5:reasons.append("LOW_JOB_ENTITY_DENSITY")
     return list(dict.fromkeys(reasons))
@@ -71,7 +76,7 @@ def score_list(url:str,payload:Any)->tuple[int,list[str],dict[str,Any]]:
     if density>=0.8:score+=4;evidence.append(f"high job entity density: {density:.2f}")
     observed=length
     if observed>=5:score+=3;evidence.append(f"response contains {observed} records")
-    total=find_field(payload,{"total","count","totalcount","total_count"})
+    total=find_field(payload,TOTAL_TIER1) or find_field(payload,TOTAL_TIER2)
     if total:score+=2;evidence.append(f"response has total field: {total}")
     if not items and isinstance(payload,dict):score-=3;evidence.append("no list-shaped response")
     if reasons:score=min(score,9);evidence.extend(f"rejected: {x}" for x in reasons)
@@ -94,3 +99,11 @@ def score_detail(url:str,payload:Any)->tuple[int,list[str]]:
     if fields&IDS:score+=2;evidence.append("response contains job id")
     return score,evidence
 def confidence(score:int)->str:return "HIGH" if score>=15 else "MEDIUM" if score>=10 else "LOW"
+
+def reliable_list_candidate(candidate:Any)->bool:
+    """Whether an already-scored candidate is strong enough for navigation early-stop."""
+    if not candidate or candidate.confidence!="HIGH" or candidate.rejection_reasons or candidate.job_entity_density<0.8:return False
+    fields={str(x).lower() for x in candidate.response_shape.get("sample_field_names",[])}
+    has_id=bool(fields&{x.lower() for x in ("id","jobId","job_id","jobPostId","positionId","requisitionId","postingId")})
+    has_title=bool(fields&{x.lower() for x in ("title","name","jobTitle","job_name","positionName","projectPositionName")})
+    return has_id and has_title

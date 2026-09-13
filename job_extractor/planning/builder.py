@@ -1,5 +1,6 @@
 from __future__ import annotations
 from job_extractor.discovery.models import ApiCandidate,DiscoveryResult
+from job_extractor.planning.execution_contract import missing_fields
 from job_extractor.planning.models import CollectionPlan
 from job_extractor.planning.validator import CollectionPlanValidator
 
@@ -34,7 +35,8 @@ class CollectionPlanBuilder:
         is_state=candidate.source_type=="SERIALIZED_STATE"
         executable=structurally_high and (is_state or candidate.replayable) and pagination!="UNKNOWN" and detail_executable and (not sensitive_request or candidate.method=="POST")
         mode="SERIALIZED_STATE" if structurally_high and is_state else ("BROWSER_API" if structurally_high and (browser_required or sensitive_request) else ("HTTP_API" if structurally_high else "UNSUPPORTED"))
-        return CollectionPlan(source_url=result.source_url,company=result.company,mode=mode,executable=executable,
+        warnings=(["BROWSER_API_NOT_REPLAYABLE"] if structurally_high and not candidate.replayable else (["API_PLAN_NOT_EXECUTABLE"] if structurally_high and not executable else [])) if structurally_high else ["PLAN_REQUIRES_REVIEW" if medium else "PLAN_UNSUPPORTED"]
+        api_plan=CollectionPlan(source_url=result.source_url,company=result.company,mode=mode,executable=executable,
             review_required=medium or (structurally_high and not executable),list_endpoint=candidate.url,list_method=candidate.method,pagination_type=pagination,
             page_param=result.detected_pagination.page_param,offset_param=result.detected_pagination.page_param if pagination=="OFFSET" else None,page_size_param=result.detected_pagination.page_size_param,cursor_param=result.detected_pagination.cursor_param,
             next_cursor_field=result.detected_pagination.next_cursor_field,has_more_field=result.detected_pagination.has_more_field,
@@ -42,8 +44,17 @@ class CollectionPlanBuilder:
             detail_mode=detail,detail_endpoint_template=detail_template,detail_method=detail_candidate.method if detail_candidate else None,detail_id_field=jid,detail_url_field=url_field,browser_trigger="AUTO_PAGINATION" if mode=="BROWSER_API" else None,
             detail_title_selector=detail_dom.get("title_selector"),detail_location_selector=detail_dom.get("location_selector"),detail_department_selector=detail_dom.get("department_selector"),detail_employment_type_selector=detail_dom.get("employment_type_selector"),detail_jd_selector=detail_dom.get("jd_selector"),
             scope=result.detected_scope,confidence=candidate.confidence,evidence=candidate.evidence,visible_total=result.dom_fallback.get("visible_result_count"),navigation_audit=result.detail_dom.get("navigation_audit") or [],source_index=candidate.source_index,originating_titles=result.dom_fallback.get("originating_titles") or {},originating_ids=result.dom_fallback.get("originating_ids") or {},
-            warnings=(["BROWSER_API_NOT_REPLAYABLE"] if structurally_high and not candidate.replayable else (["API_PLAN_NOT_EXECUTABLE"] if structurally_high and not executable else [])) if structurally_high else ["PLAN_REQUIRES_REVIEW" if medium else "PLAN_UNSUPPORTED"],
+            warnings=warnings,
             observed_endpoints=[x.url for x in result.candidate_list_apis+result.candidate_detail_apis],ats_profile=result.ats_profile)
+        gaps=missing_fields(api_plan)
+        if executable and gaps:
+            executable=False
+            warnings=["API_PLAN_NOT_EXECUTABLE"]+[f"MISSING_{gap}" for gap in gaps]
+        elif gaps and mode in ("HTTP_API","BROWSER_API","SERIALIZED_STATE"):
+            warnings=list(warnings)+[f"MISSING_{gap}" for gap in gaps]
+        update={"executable":executable,"warnings":warnings}
+        if not executable and mode in ("HTTP_API","BROWSER_API","SERIALIZED_STATE"):update["review_required"]=True
+        return api_plan.model_copy(update=update)
 
     def _dom_plan(self,result:DiscoveryResult)->CollectionPlan|None:
         links=result.dom_fallback.get("possible_detail_links") or []

@@ -12,6 +12,8 @@ from job_extractor.exporters import export_collection_result
 from job_extractor.url_utils import normalize_url
 from job_extractor.runtime import build_output_filename, collect_url, render_result
 from job_extractor.planning import CollectionPlanValidator
+from job_extractor.planning.execution_contract import PlanContractError
+from job_extractor.models import CollectionResult
 from job_extractor.reporting import ReportManager
 from job_extractor.discovery import load_reusable_discovery
 from job_extractor.discovery.runtime_data import resolve_encrypted_runtime_terminal
@@ -25,6 +27,13 @@ def generate_and_render_reports(result,run_directory,adapter_name):
     export_collection_result(result,artifacts.json_path)
     return (f"Detected platform: {result.platform}\nAdapter: {adapter_name}\n\nCollection complete.\n\nExpected: {result.total_expected}\nFetched: {result.total_fetched}\nUnique: {result.total_unique}\nStatus: {result.status}\n\nReports:\n"
             f"  JSON: {artifacts.json_path}\n  Excel: {artifacts.excel_path}\n  Markdown: {artifacts.markdown_path}")
+
+def execute_plan_or_report(generic, collection_plan) -> CollectionResult|None:
+    try:
+        return generic.execute_plan(collection_plan)
+    except PlanContractError as exc:
+        typer.echo(f"Execution contract rejected plan.\nExecution mode: {exc.execution_mode}\nMissing fields: {', '.join(exc.missing_fields) or '-'}\nReason: {exc.reason}")
+        return None
 
 def version_callback(value: bool) -> None:
     if value:
@@ -91,7 +100,8 @@ def main(
                 typer.echo(f"Scope selection required: {', '.join(navigation.graph.available_scopes)}");return
             if not validation.valid:
                 typer.echo("Plan requires review. Generic collection stopped.");return
-            collected=generic.execute_plan(collection_plan)
+            collected=execute_plan_or_report(generic,collection_plan)
+            if collected is None:return
             run_name=build_output_filename(url,datetime.now()).removesuffix(".json")
             typer.echo(generate_and_render_reports(collected,OUTPUT_DIR/run_name,generic.__class__.__name__));return
         top=result.probable_list_api; detail=result.candidate_detail_apis[0] if result.candidate_detail_apis else None
@@ -117,7 +127,8 @@ def main(
             if runtime_plan.mode=="BROWSER_RUNTIME_DATA" and runtime_validation.valid:
                 source=runtime_plan.runtime_source or {}
                 typer.echo(f"Runtime pagination: model={source.get('pagination_model')} total={source.get('total')} limit={source.get('limit')} pages={source.get('page_count')}")
-                collected=generic.execute_plan(runtime_plan)
+                collected=execute_plan_or_report(generic,runtime_plan)
+                if collected is None:return
                 run_name=build_output_filename(url,datetime.now()).removesuffix(".json")
                 typer.echo(generate_and_render_reports(collected,OUTPUT_DIR/run_name,generic.__class__.__name__));return
         navigation,stability=stable_navigation(url,generic.discover,default_registry,scope,initial_result=result,deadline_seconds=75)
@@ -137,7 +148,8 @@ def main(
         typer.echo(f"Discovery status: {result.status}\nPlan mode: {collection_plan.mode}\nPlan confidence: {collection_plan.confidence}\nPlan valid: {validation.valid}")
         if can_auto_execute_generic(collection_plan,validation,navigation,result):
             typer.echo("Generic executable plan found.\nCollecting jobs...")
-            collected=generic.execute_plan(collection_plan)
+            collected=execute_plan_or_report(generic,collection_plan)
+            if collected is None:return
             run_name=build_output_filename(url,datetime.now()).removesuffix(".json")
             typer.echo(generate_and_render_reports(collected,OUTPUT_DIR/run_name,generic.__class__.__name__));return
         typer.echo("Executable plan available. Run with --collect-generic." if validation.valid else "Plan requires review.")

@@ -61,12 +61,14 @@ def find_field(value: Any,names: set[str],max_depth: int=4,depth: int=0,prefix: 
         found=find_field(v,names,max_depth,depth+1,path)
         if found:return found
     return None
+TOTAL_TIER1={"total","totalcount","total_count","totalelements","total_elements","recordstotal","records_total"}
+TOTAL_TIER2={"count"}
 def response_shape(value: Any) -> dict[str,Any]:
     if not isinstance(value,(dict,list)):return {}
     path,length,items=list_observation(value); fields=sorted({str(k) for x in items if isinstance(x,dict) for k in list(x)[:100]})[:100]
     return {"top_level_keys":sorted(value.keys())[:100] if isinstance(value,dict) else [],
             "candidate_list_path":path,"sample_field_names":fields,"array_length":length,"sampled_items":len(items),
-            "total_field":find_field(value,{"total","count","totalcount","total_count"})}
+            "total_field":find_field(value,TOTAL_TIER1) or find_field(value,TOTAL_TIER2)}
 def get_path(value:Any,path:str|None)->Any:
     if not path:return None
     for part in (path or "").split("."):
