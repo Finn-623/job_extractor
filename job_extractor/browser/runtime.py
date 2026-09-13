@@ -46,8 +46,11 @@ class BrowserRuntime(AbstractContextManager):
         body=response.json()
         if not isinstance(body,dict): raise BrowserRuntimeError("BROWSER_RESPONSE_NOT_OBJECT")
         request=response.request
-        return CapturedResponse(safe_request_url(request.url),request.method,None,
-                                response.status,body)
+        # Keep the full wire URL (with query) and observed headers in memory only:
+        # scope-bearing functional headers (e.g. feishu website-path) would otherwise
+        # be lost between capture and replay (STEP49C evidence).
+        return CapturedResponse(safe_request_url(request.url),request.method,request.post_data,
+                                response.status,body,request.url,dict(request.headers))
     def open_and_capture(self,url: str,fragment: str,method: str="POST") -> CapturedResponse:
         if not self.page: raise BrowserRuntimeError("BROWSER_CONTEXT_CLOSED")
         try:

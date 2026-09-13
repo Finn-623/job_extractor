@@ -19,6 +19,20 @@ class CollectionMetrics(BaseModel):
     detail_fallback_seconds: float = 0.0
     normalize_seconds: float = 0.0
     export_seconds: float = 0.0
+    pages_requested: int = 0
+    pages_succeeded: int = 0
+    raw_rows: int = 0
+    unique_jobs: int = 0
+    duplicate_jobs: int = 0
+    retry_count: int = 0
+    retry_sleep_seconds: float = 0.0
+    list_request_seconds: float = 0.0
+    detail_request_seconds: float = 0.0
+    average_list_request_seconds: float = 0.0
+    average_detail_request_seconds: float = 0.0
+    termination_reason: str | None = None
+    collection_mode: str | None = None
+    max_concurrency_observed: int = 1
 
 class DataCompleteness(BaseModel):
     total_jobs: int = 0

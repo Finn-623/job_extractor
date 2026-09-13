@@ -24,16 +24,33 @@ class MetricsRecorder:
     def __init__(self) -> None:
         self.metrics = CollectionMetrics()
         self._start = perf_counter()
-    def record_list_request(self) -> None: self.metrics.list_requests += 1
+    def record_list_request(self) -> None:
+        self.metrics.list_requests += 1; self.metrics.pages_requested += 1
     def record_detail_request(self, success: bool | None = None) -> None:
         self.metrics.detail_requests += 1; self.metrics.details_attempted += 1
         if success is True: self.metrics.details_succeeded += 1
         elif success is False: self.metrics.details_failed += 1
-    def record_page(self) -> None: self.metrics.list_pages += 1
+    def record_page(self) -> None:
+        self.metrics.list_pages += 1; self.metrics.pages_succeeded += 1
+    def record_rows(self,raw:int,new_unique:int) -> None:
+        self.metrics.raw_rows += raw; self.metrics.unique_jobs += new_unique
+        self.metrics.duplicate_jobs += max(0,raw-new_unique)
+    def record_retry(self,sleep_seconds:float=0.0) -> None:
+        self.metrics.retry_count += 1; self.metrics.retry_sleep_seconds += max(0.0,sleep_seconds)
+    def record_list_latency(self,seconds:float) -> None:
+        self.metrics.list_request_seconds += max(0.0,seconds)
+    def record_detail_latency(self,seconds:float) -> None:
+        self.metrics.detail_request_seconds += max(0.0,seconds)
+    def set_termination(self,reason:str) -> None:self.metrics.termination_reason=reason
+    def set_collection_mode(self,mode:str) -> None:self.metrics.collection_mode=mode
     def set_page_size(self, size: int | None) -> None: self.metrics.page_size = size
     def set_jd_strategy(self, strategy: str) -> None: self.metrics.jd_strategy = strategy  # type: ignore[assignment]
     def finish(self) -> CollectionMetrics:
         self.metrics.elapsed_seconds = perf_counter() - self._start
+        if self.metrics.list_requests:
+            self.metrics.average_list_request_seconds = self.metrics.list_request_seconds / self.metrics.list_requests
+        if self.metrics.detail_requests:
+            self.metrics.average_detail_request_seconds = self.metrics.detail_request_seconds / self.metrics.detail_requests
         return self.metrics
 
 def evaluate_collection_status(*, list_started: bool, expected: int | None, unique: int,
@@ -78,6 +95,9 @@ def _metrics(adapter: BaseAdapter) -> CollectionMetrics:
     metrics.browser_requests_observed=getattr(adapter,"browser_requests_observed",0)
     for name in ("initial_load_seconds","list_pagination_seconds","detail_fallback_seconds","normalize_seconds"):
         setattr(metrics,name,getattr(adapter,name,0.0))
+    source_metrics=getattr(getattr(adapter,"recorder",None),"metrics",None)
+    for name in ("pages_requested","pages_succeeded","raw_rows","unique_jobs","duplicate_jobs","retry_count","retry_sleep_seconds","list_request_seconds","detail_request_seconds","average_list_request_seconds","average_detail_request_seconds","termination_reason","collection_mode","max_concurrency_observed"):
+        if source_metrics is not None:setattr(metrics,name,getattr(source_metrics,name,getattr(metrics,name)))
     return metrics
 
 def evaluate_data_completeness(result: CollectionResult) -> DataCompleteness:
@@ -112,4 +132,4 @@ def render_result(result: CollectionResult, adapter_name: str, output_path: Path
     m=result.metrics
     mode="\nCollection mode: browser" if result.platform=="feishu" else ""
     dc=result.data_completeness; warning=f"\nWarnings: {'; '.join(result.warnings)}\n" if result.warnings else ""
-    return f"Detected platform: {result.platform}\nAdapter: {adapter_name}{mode}\n\nScope:\n{scope}\n\nExpected: {result.total_expected}\nFetched: {result.total_fetched}\nUnique: {result.total_unique}\n\nPages: {m.list_pages}\nList requests: {m.list_requests}\nDetail requests: {m.detail_requests}\nJD strategy: {m.jd_strategy}\n\nElapsed: {m.elapsed_seconds:.2f}s\nCollection status: {result.status}\n\nData completeness:\n  Complete JD: {dc.complete_jobs} / {dc.total_jobs}\n  Missing JD at source: {dc.missing_jd_jobs}\n  Completeness: {dc.completeness_ratio:.1%}\n{warning}\nOutput:\n{output_path}"
+    return f"Detected platform: {result.platform}\nAdapter: {adapter_name}{mode}\n\nScope:\n{scope}\n\nExpected: {result.total_expected}\nFetched: {result.total_fetched}\nUnique: {result.total_unique}\nRaw rows: {m.raw_rows}\nDuplicates: {m.duplicate_jobs}\n\nPages: {m.list_pages}\nPages requested/succeeded: {m.pages_requested}/{m.pages_succeeded}\nList requests: {m.list_requests} (avg {m.average_list_request_seconds:.3f}s)\nDetail requests: {m.detail_requests} (avg {m.average_detail_request_seconds:.3f}s)\nRetries: {m.retry_count} (sleep {m.retry_sleep_seconds:.3f}s)\nCollection mode: {m.collection_mode}\nTermination: {m.termination_reason}\nJD strategy: {m.jd_strategy}\n\nElapsed: {m.elapsed_seconds:.2f}s\nCollection status: {result.status}\n\nData completeness:\n  Complete JD: {dc.complete_jobs} / {dc.total_jobs}\n  Missing JD at source: {dc.missing_jd_jobs}\n  Completeness: {dc.completeness_ratio:.1%}\n{warning}\nOutput:\n{output_path}"

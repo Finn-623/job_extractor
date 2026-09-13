@@ -11,9 +11,14 @@ from job_extractor.discovery.network_analyzer import safe_url
 from job_extractor.models import CollectionResult
 from job_extractor.planning.models import CollectionPlan
 
+class _BrowserReplayHttpError(RuntimeError):
+    def __init__(self,status_code:int):
+        super().__init__(f"HTTP_{status_code}");self.response=type("ResponseMeta",(),{"status_code":status_code})()
+
 class _Response:
-    def __init__(self,payload:Any):self.payload=payload
-    def raise_for_status(self):pass
+    def __init__(self,payload:Any,status_code:int=200):self.payload=payload;self.status_code=status_code
+    def raise_for_status(self):
+        if not 200<=self.status_code<300:raise _BrowserReplayHttpError(self.status_code)
     def json(self):return self.payload
 
 class _BrowserClient:
@@ -22,12 +27,23 @@ class _BrowserClient:
     def request(self,method:str,url:str,**kwargs):
         params=kwargs.get("params") or {}
         if params:url+=("&" if "?" in url else "?")+urlencode(params)
-        payload=self.page.evaluate("""async ({url,method,body}) => {
+        argument={"url":url,"method":method,"body":kwargs.get("json") or kwargs.get("data")}
+        if kwargs.get("data") is not None:argument["form"]=True
+        result=self.page.evaluate("""async ({url,method,body,form}) => {
           const options={method,credentials:'same-origin'};
-          if(method!=='GET'){options.headers={'content-type':'application/json'};options.body=JSON.stringify(body||{});}
-          const response=await fetch(url,options);if(!response.ok)throw new Error(`HTTP_${response.status}`);return await response.json();
-        }""",{"url":url,"method":method,"body":kwargs.get("json")})
-        return _Response(payload)
+          if(method!=='GET'){
+            options.headers={'content-type':form?'application/x-www-form-urlencoded':'application/json'};
+            options.body=form?new URLSearchParams(body||{}).toString():JSON.stringify(body||{});
+          }
+          const response=await fetch(url,options);let payload=null;
+          try{payload=await response.json();}catch(_error){}
+          return {status:response.status,payload};
+        }""",argument)
+        # Backward-compatible with lightweight/fake Page implementations and
+        # older browser helpers that return the JSON payload directly.
+        if not isinstance(result,dict) or "status" not in result:
+            return _Response(result)
+        return _Response(result.get("payload"),int(result.get("status") or 0))
 
 class _SequenceClient:
     def __init__(self,payloads):self.payloads=iter(payloads)
@@ -36,10 +52,14 @@ class _SequenceClient:
 class GenericBrowserApiCollector:
     def __init__(self,plan:CollectionPlan,browser_factory=BrowserRuntime):self.plan=plan;self.browser_factory=browser_factory
     def collect(self):
-        if self.plan.browser_trigger=="AUTO_PAGINATION":return self._collect_observed_pages()
+        if self.plan.pagination_type not in ("PAGE","OFFSET") and self.plan.browser_trigger=="AUTO_PAGINATION":return self._collect_observed_pages()
         with self.browser_factory() as runtime:
             runtime.page.goto(self.plan.source_url,wait_until="domcontentloaded")
-            return GenericHttpCollector(self.plan,client=_BrowserClient(runtime.page)).collect()
+            result=GenericHttpCollector(self.plan,client=_BrowserClient(runtime.page)).collect()
+            result.metrics.browser_pages_opened=runtime.pages_opened
+            result.metrics.browser_requests_observed=runtime.requests_observed
+            result.metrics.collection_mode="BROWSER_SESSION_REPLAY"
+            return result
     def _collect_observed_pages(self):
         started=datetime.now();clock=perf_counter();payloads=[];capture_error=None
         endpoint=safe_url(self.plan.list_endpoint or "")[0];method=self.plan.list_method or "GET"

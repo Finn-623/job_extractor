@@ -1,5 +1,6 @@
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from time import sleep
 from typing import Any
 from job_extractor.planning.models import CollectionPlan
@@ -57,6 +58,7 @@ class GenericHtmlDetailCollector:
     """Fetches public, observed detail URLs and applies semantic HTML extraction."""
     def __init__(self,plan:CollectionPlan,client,max_workers:int=2,navigation_attempts:int=3):
         self.plan=plan;self.client=client;self.max_workers=max(1,min(max_workers,8));self.navigation_attempts=max(1,min(navigation_attempts,3))
+        self._active=0;self._lock=Lock();self.max_concurrency_observed=0
     def _url(self,raw:dict,id_fields:tuple[str,...])->tuple[str|None,Any]:
         jid=next((extract_path(raw,k) for k in id_fields if k and extract_path(raw,k) not in (None,"")),None)
         value=extract_path(raw,self.plan.detail_url_field) if self.plan.detail_url_field else None
@@ -68,7 +70,7 @@ class GenericHtmlDetailCollector:
         trusted={source_host,*(x.lower() for x in self.plan.trusted_detail_hosts)}
         if parsed.scheme not in ("http","https") or (parsed.hostname or "").lower() not in trusted:return None,jid
         return url,jid
-    def _fetch(self,item:tuple[int,dict],id_fields:tuple[str,...],title_fields:tuple[str,...]):
+    def _fetch_one(self,item:tuple[int,dict],id_fields:tuple[str,...],title_fields:tuple[str,...]):
         index,raw=item;url,jid=self._url(raw,id_fields)
         if not url:return index,raw,"DETAIL_SOURCE_NOT_FOUND",jid
         title=next((extract_path(raw,k) for k in title_fields if k and isinstance(extract_path(raw,k),str)),None)
@@ -87,6 +89,12 @@ class GenericHtmlDetailCollector:
         if failure:return index,raw,failure if failure in DETAIL_FAILURE_CODES else "PARSE_FAILED",jid
         enriched=dict(raw);enriched.update({"_generic_description":detail["full_jd"],"_generic_responsibilities":detail["responsibilities"],"_generic_requirements":detail["requirements"],"_generic_detail_url":url,"_generic_detail_source":detail["source_type"],"_generic_bound_id":detail.get("bound_id")})
         return index,enriched,None,jid
+    def _fetch(self,item:tuple[int,dict],id_fields:tuple[str,...],title_fields:tuple[str,...]):
+        with self._lock:
+            self._active+=1;self.max_concurrency_observed=max(self.max_concurrency_observed,self._active)
+        try:return self._fetch_one(item,id_fields,title_fields)
+        finally:
+            with self._lock:self._active-=1
     def enrich(self,raws:list[dict],id_fields:tuple[str,...],title_fields:tuple[str,...])->tuple[list[dict],int,list[tuple[str,Any]]]:
         failures=[];succeeded=0
         with ThreadPoolExecutor(max_workers=min(self.max_workers,len(raws) or 1)) as pool:

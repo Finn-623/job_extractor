@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
-from time import perf_counter
+from time import perf_counter,sleep
 from typing import Any
 from urllib.parse import urlparse
 import hashlib,json,httpx
@@ -13,6 +13,10 @@ from job_extractor.discovery.dom_semantics import credible_jd
 from job_extractor.discovery.dynamic import graphql_next_values,pagination_stop
 from job_extractor.identity import job_identity
 from job_extractor.planning.execution_contract import PlanContractError,transport_gaps
+
+class CollectionDeadlineExceeded(RuntimeError):pass
+class PageRequestFailed(RuntimeError):
+    def __init__(self,name:str,transient:bool):super().__init__(name);self.transient=transient
 
 ID_FIELDS=("id","job_id","jobId","jobPostId","positionId","requisitionId","requisition_id")
 TITLE_FIELDS=("title","name","jobTitle","positionName")
@@ -79,17 +83,42 @@ def _find_identity_field(raw,names):
     return None,None
 
 class GenericHttpCollector:
-    def __init__(self,plan:CollectionPlan,client:httpx.Client|None=None,max_pages:int=1000):
+    def __init__(self,plan:CollectionPlan,client:httpx.Client|None=None,max_pages:int=1000,
+                 max_retries:int=2,retry_backoff_base:float=0.25,deadline_seconds:float=180.0,
+                 sleep_fn=sleep,clock=perf_counter):
         self.plan=plan;self.client=client or httpx.Client(timeout=30,follow_redirects=True);self.max_pages=max_pages
+        self.max_retries=max(0,max_retries);self.retry_backoff_base=max(0.0,retry_backoff_base)
+        self.deadline_seconds=max(0.0,deadline_seconds);self.sleep_fn=sleep_fn;self.clock=clock
         self.recorder=MetricsRecorder();self.list_requests=self.page_count=self.details_attempted=self.details_succeeded=self.details_failed=0
         self.detail_strategy=plan.detail_mode;self.page_size=None;self.elapsed_seconds=0.0;self.scope=None
-    def _request(self,values:dict[str,Any]):
+    def _request(self,values:dict[str,Any],query_values:dict[str,Any]|None=None):
         method=self.plan.list_method or "GET"
-        if method=="GET":kwargs={"params":values}
+        if method=="GET":kwargs={"params":dict(values)}
         else:
-            kwargs={"params":self.plan.query_values}
-            kwargs["data" if self.plan.body_encoding=="FORM" else "json"]=values
+            kwargs={"params":dict(query_values if query_values is not None else self.plan.query_values)}
+            kwargs["data" if self.plan.body_encoding=="FORM" else "json"]=dict(values)
         response=self.client.request(method,self.plan.list_endpoint,**kwargs);response.raise_for_status();return response.json()
+    @staticmethod
+    def _transient(exc:Exception)->bool:
+        if isinstance(exc,(TimeoutError,httpx.TimeoutException,httpx.TransportError)):return True
+        if isinstance(exc,httpx.HTTPStatusError):
+            status=exc.response.status_code
+            return status==429 or 500<=status<600
+        status=getattr(getattr(exc,"response",None),"status_code",None)
+        return status==429 or isinstance(status,int) and 500<=status<600
+    def _request_with_retry(self,values:dict[str,Any],query_values:dict[str,Any],deadline:float):
+        for attempt in range(self.max_retries+1):
+            if self.clock()>=deadline:raise CollectionDeadlineExceeded()
+            self.recorder.record_list_request()
+            try:return self._request(values,query_values)
+            except Exception as exc:
+                transient=self._transient(exc)
+                if not transient or attempt>=self.max_retries:raise PageRequestFailed(type(exc).__name__,transient) from exc
+                delay=self.retry_backoff_base*(2**attempt)
+                remaining=deadline-self.clock()
+                if remaining<=0:raise CollectionDeadlineExceeded() from exc
+                delay=min(delay,remaining);self.recorder.record_retry(delay)
+                if delay:self.sleep_fn(delay)
     def _job(self,raw:dict)->Job|None:
         source_jid=pick(raw,(self.plan.job_id_field,)+ID_FIELDS if self.plan.job_id_field else ID_FIELDS)
         title=pick(raw,(self.plan.job_title_field,)+TITLE_FIELDS if self.plan.job_title_field else TITLE_FIELDS)
@@ -120,30 +149,50 @@ class GenericHttpCollector:
             from job_extractor.planning.execution_contract import GAP_REASONS
             missing=[GAP_REASONS.get(gap,f"MISSING_{gap}") for gap in gaps]
             raise PlanContractError(f"COLLECTION_CONTRACT_VIOLATION gaps={','.join(missing)}",execution_mode=self.plan.mode,missing_fields=missing)
-        started=datetime.now();clock=perf_counter();errors=[];raws=[];values=dict(self.plan.initial_values);seen_cursors=set();expected=None
-        try:
-            for _ in range(self.max_pages):
-                payload=self._request(values);self.recorder.record_list_request();self.recorder.record_page()
+        started=datetime.now();clock=self.clock();deadline=clock+self.deadline_seconds;errors=[];raws=[];values=dict(self.plan.initial_values);query_values=dict(self.plan.query_values);seen_cursors=set();seen_ids=set();expected=None;termination=None
+        self.recorder.set_collection_mode("DIRECT_HTTP_REPLAY" if self.plan.mode=="HTTP_API" else "BROWSER_SESSION_REPLAY")
+        for _ in range(self.max_pages):
+            try:payload=self._request_with_retry(values,query_values,deadline)
+            except CollectionDeadlineExceeded:
+                errors.append(make_error("COLLECTION_DEADLINE_EXCEEDED","global collection deadline reached"));termination="DEADLINE_EXCEEDED";break
+            except PageRequestFailed as exc:
+                code="PAGE_REQUEST_RETRIES_EXHAUSTED" if exc.transient else "PAGE_REQUEST_FAILED"
+                errors.append(make_error(code,str(exc)));termination="REQUEST_FAILED";break
+            try:
+                self.recorder.record_page()
                 batch=path_get(payload,self.plan.list_path)
                 if not isinstance(batch,list):errors.append(make_error("LIST_PATH_INVALID","planned list path not found"));break
                 records=[unwrap_item(x,self.plan.list_item_path) for x in batch]
                 records=[x for x in records if isinstance(x,dict)]
                 if not raws and not records and (self.plan.observed_list_length or 0)>0:
                     errors.append(make_error("REPLAY_RESPONSE_EMPTY",f"discovery observed {self.plan.observed_list_length} records but replay returned zero"))
-                previous_unique=len({str(pick(x,(self.plan.job_id_field,)+ID_FIELDS if self.plan.job_id_field else ID_FIELDS)) for x in raws})
+                previous_unique=len(seen_ids)
                 raws.extend(records)
+                for record in records:
+                    jid=pick(record,(self.plan.job_id_field,)+ID_FIELDS if self.plan.job_id_field else ID_FIELDS)
+                    key=str(jid) if jid is not None else hashlib.sha256(json.dumps(safe_business_data(record),sort_keys=True,default=str).encode()).hexdigest()
+                    seen_ids.add(key)
+                unique_count=len(seen_ids);self.recorder.record_rows(len(records),unique_count-previous_unique)
                 total=path_get(payload,self.plan.total_field)
                 if isinstance(total,int):expected=total
-                if self.plan.pagination_type in ("NONE","SINGLE_RESPONSE","UNKNOWN"):break
+                if self.plan.pagination_type in ("NONE","SINGLE_RESPONSE","UNKNOWN"):
+                    termination="SINGLE_RESPONSE";break
                 has_more=path_get(payload,self.plan.has_more_field);cursor=path_get(payload,self.plan.next_cursor_field)
-                unique_count=len({str(pick(x,(self.plan.job_id_field,)+ID_FIELDS if self.plan.job_id_field else ID_FIELDS)) for x in raws})
                 stop=pagination_stop(official_total=expected,unique_count=unique_count,previous_unique=previous_unique,has_more=has_more if isinstance(has_more,bool) else None,cursor=cursor,seen_cursors=seen_cursors)
-                if stop=="CURSOR_EXHAUSTED" and self.plan.pagination_type in ("CURSOR","GRAPHQL_CURSOR"):errors.append(make_error("PAGINATION_LOOP","cursor repeated"))
-                if not batch or stop:break
+                if stop=="OFFICIAL_TOTAL_REACHED":termination="TOTAL_REACHED";break
+                if stop=="HAS_MORE_FALSE":termination="HAS_MORE_FALSE";break
+                if not records:termination="EMPTY_PAGE";break
+                if stop=="NO_NEW_UNIQUE_JOBS":
+                    errors.append(make_error("PAGINATION_NO_PROGRESS","page added no new stable job IDs"));termination="NO_PROGRESS";break
+                if stop=="CURSOR_EXHAUSTED":
+                    errors.append(make_error("PAGINATION_LOOP","cursor repeated"));termination="NO_PROGRESS";break
+                size_source=values if self.plan.page_size_param in values else query_values
+                configured_size=int(size_source.get(self.plan.page_size_param,0) or 0) if self.plan.page_size_param else 0
+                if configured_size and len(records)<configured_size:termination="SHORT_PAGE";break
                 if self.plan.pagination_type=="PAGE":
-                    key=self.plan.page_param;target=values if key in values else self.plan.query_values;target[key]=int(target.get(key,0))+1
+                    key=self.plan.page_param;target=values if key in values else query_values;before=int(target.get(key,0));target[key]=before+1
                 elif self.plan.pagination_type=="OFFSET":
-                    key=self.plan.offset_param;target=values if key in values else self.plan.query_values;size_source=values if self.plan.page_size_param in values else self.plan.query_values;size=int(size_source.get(self.plan.page_size_param,len(batch)));target[key]=int(target.get(key,0))+size
+                    key=self.plan.offset_param;target=values if key in values else query_values;size_source=values if self.plan.page_size_param in values else query_values;size=int(size_source.get(self.plan.page_size_param,len(records)));target[key]=int(target.get(key,0))+size
                 elif self.plan.pagination_type=="CURSOR":
                     cursor=path_get(payload,self.plan.next_cursor_field or self.plan.cursor_param)
                     if not cursor or cursor in seen_cursors:
@@ -153,12 +202,17 @@ class GenericHttpCollector:
                 elif self.plan.pagination_type in ("GRAPHQL_CURSOR","GRAPHQL_OFFSET","GRAPHQL_PAGE"):
                     if self.plan.pagination_type=="GRAPHQL_CURSOR":seen_cursors.add(cursor)
                     values=graphql_next_values(values,self.plan.pagination_type,self.plan.page_param,self.plan.page_size_param,cursor,len(batch))
-            else:errors.append(make_error("PAGINATION_LIMIT","max pages reached"))
-        except Exception as exc:errors.append(make_error("GENERIC_HTTP_ERROR",type(exc).__name__))
+            except Exception as exc:
+                errors.append(make_error("GENERIC_HTTP_ERROR",type(exc).__name__));termination="SCHEMA_OR_RUNTIME_ERROR";break
+        else:
+            errors.append(make_error("PAGINATION_LIMIT","max pages reached"));termination="MAX_PAGES"
+        self.recorder.set_termination(termination or "UNKNOWN")
         if self.plan.detail_mode in ("DETAIL_REQUIRED","DETAIL_FALLBACK") and self.plan.detail_endpoint_template and "{id}" in self.plan.detail_endpoint_template:
             for index,raw in enumerate(raws):
                 needs=self.plan.detail_mode=="DETAIL_REQUIRED" or not pick(raw,("description","content","jobDescription"))
                 if not needs:continue
+                if self.clock()>=deadline:
+                    errors.append(make_error("COLLECTION_DEADLINE_EXCEEDED","detail enrichment budget exhausted"));self.recorder.set_termination("DEADLINE_EXCEEDED");break
                 jid=pick(raw,(self.plan.detail_id_field,)+ID_FIELDS if self.plan.detail_id_field else ID_FIELDS)
                 try:
                     detail=GenericHttpDetailCollector(self.plan,self.client).fetch(str(jid))
@@ -171,7 +225,9 @@ class GenericHttpCollector:
                     self.recorder.record_detail_request(False);errors.append(make_error("GENERIC_DETAIL_ERROR",type(exc).__name__,job_id=jid))
         if self.plan.detail_mode=="DETAIL_HTTP_HTML":
             id_fields=tuple(x for x in (self.plan.detail_id_field,*ID_FIELDS) if x);title_fields=tuple(x for x in (self.plan.job_title_field,*TITLE_FIELDS) if x)
-            raws,success,failures=GenericHtmlDetailCollector(self.plan,self.client).enrich(raws,id_fields,title_fields)
+            detail_collector=GenericHtmlDetailCollector(self.plan,self.client)
+            raws,success,failures=detail_collector.enrich(raws,id_fields,title_fields)
+            self.recorder.metrics.max_concurrency_observed=detail_collector.max_concurrency_observed
             for _ in range(success):self.recorder.record_detail_request(True)
             for code,jid in failures:
                 self.recorder.record_detail_request(False);errors.append(make_error(code,"detail HTML enrichment failed",job_id=jid))
@@ -201,11 +257,11 @@ class GenericHttpCollector:
             reasons={}
             for item in normalization_trace:reasons[item["reason"]]=reasons.get(item["reason"],0)+1
             errors.append(make_error("NORMALIZATION_REJECTED_ALL",json.dumps(reasons,sort_keys=True)))
-        if expected is None:expected=len(raws) if self.plan.pagination_type in ("NONE","SINGLE_RESPONSE") else None
+        if expected is None and termination in ("SINGLE_RESPONSE","HAS_MORE_FALSE","EMPTY_PAGE","SHORT_PAGE"):expected=len(unique)
         explained=audit["collapsed_count"]>0 and audit["unexplained_count"]==0
         if audit["unexplained_count"]:errors.append(make_error("UNEXPLAINED_DUPLICATES","duplicate records could not be safely collapsed",count=audit["unexplained_count"]))
         counts_complete=expected==len(raws) and (len(raws)==len(unique) or explained)
-        status="FAILED" if not self.recorder.metrics.list_requests else ("COMPLETE" if counts_complete and not errors and expected and expected > 0 and unique else "INCOMPLETE")
+        status="FAILED" if not self.recorder.metrics.list_pages else ("COMPLETE" if counts_complete and not errors and expected is not None and expected>=0 and (unique or expected==0) else "INCOMPLETE")
         self._sync(clock)
         result=CollectionResult(source_url=self.plan.source_url,platform="generic",company=self.plan.company,scope=self.plan.scope,total_expected=expected,
             total_fetched=len(raws),total_unique=len(unique),status=status,jobs=list(unique.values()),errors=errors,duplicate_audit=audit,started_at=started,finished_at=datetime.now())
