@@ -1,6 +1,14 @@
-﻿from datetime import datetime
+﻿from __future__ import annotations
+
+import re
+from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Lone UTF-16 surrogate units: invalid in well-formed UTF-8 / XML. Kept at
+# module scope so the Job validator can reuse the compiled pattern cheaply.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 class CollectionMetrics(BaseModel):
     list_requests: int = 0
@@ -42,6 +50,15 @@ class DataCompleteness(BaseModel):
     missing_responsibilities_jobs: int = 0
     source_incomplete_jobs: int = 0
     completeness_ratio: float = 1.0
+    # STEP 51 JD/detail diagnostics.
+    jd_complete: int = 0
+    jd_incomplete: int = 0
+    list_sufficient: int = 0
+    detail_required: int = 0
+    detail_attempted: int = 0
+    detail_succeeded: int = 0
+    detail_failed: int = 0
+    source_requirements_absent: int = 0
 
 class Job(BaseModel):
     company: str | None = None
@@ -63,6 +80,49 @@ class Job(BaseModel):
     publish_date: str | None = None
     raw_data: dict[str, Any] = Field(default_factory=dict)
     collected_at: datetime = Field(default_factory=datetime.now)
+
+    @staticmethod
+    def _drop_lone_surrogates(value: Any) -> Any:
+        """Remove lone UTF-16 surrogate units (U+D800–U+DFFF) from strings.
+
+        Lone surrogates cannot be encoded to UTF-8, so a single one anywhere
+        inside a Job would crash JSON export and Markdown file writes. Only
+        the invalid units are dropped: CJK text, emoji, tabs, newlines and
+        bullets are preserved byte-for-byte.
+        """
+        if isinstance(value, str):
+            if _LONE_SURROGATE.search(value):
+                return _LONE_SURROGATE.sub("", value)
+            return value
+        if isinstance(value, list):
+            return [Job._drop_lone_surrogates(x) for x in value]
+        if isinstance(value, dict):
+            return {key: Job._drop_lone_surrogates(item) for key, item in value.items()}
+        return value
+
+    @model_validator(mode="after")
+    def _text_safety(self) -> "Job":
+        if self.job_title and _LONE_SURROGATE.search(self.job_title):
+            self.job_title = _LONE_SURROGATE.sub("", self.job_title)
+        for name in ("company", "job_category", "department", "recruitment_type",
+                     "education", "major", "full_jd", "apply_url", "detail_url",
+                     "source_url", "publish_date"):
+            value = getattr(self, name)
+            if isinstance(value, str) and _LONE_SURROGATE.search(value):
+                setattr(self, name, _LONE_SURROGATE.sub("", value))
+        if self.locations:
+            self.locations = [  # type: ignore[list-item]
+                Job._drop_lone_surrogates(x) for x in self.locations
+            ]
+        self.responsibilities = [  # type: ignore[list-item]
+            Job._drop_lone_surrogates(x) for x in self.responsibilities
+        ]
+        self.requirements = [  # type: ignore[list-item]
+            Job._drop_lone_surrogates(x) for x in self.requirements
+        ]
+        if self.raw_data:
+            self.raw_data = Job._drop_lone_surrogates(self.raw_data)
+        return self
 
 class CollectionResult(BaseModel):
     source_url: str

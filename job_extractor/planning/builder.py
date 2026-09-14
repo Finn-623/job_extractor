@@ -6,7 +6,24 @@ from job_extractor.planning.validator import CollectionPlanValidator
 
 IDS=("id","job_id","jobId","jobPostId","postingId","positionId","requisitionId","requisition_id","internal_job_id")
 TITLES=("title","name","jobTitle","positionName","projectPositionName","job_title","position_name")
-JD={x.lower() for x in ("description","overview","content","jobdescription","job_description","responsibilities","requirements","requirement","qualifications","projectPositionDto")}
+# STEP 51: extended with the generic JD vocabulary from field_semantics so a
+# list response carrying any recognized JD-style field is treated as
+# LIST_SUFFICIENT (no per-job detail fetch), and split halves (duty /
+# requirement style fields) also count. Kept superset of the original set.
+JD={x.lower() for x in (
+    "description","overview","content","jobdescription","job_description",
+    "responsibilities","requirements","requirement","qualifications",
+    "projectpositiondto",
+    "jobdesc","positiondescription","position_description","jd_content",
+    "jdcontent","jd","summary","workcontent","work_content","jobbody",
+    "job_body","detaildescription","detail_description","postcontent",
+    "post_content","richtext","rich_text","desc","jobresponsibility",
+    "job_responsibility","responsibility","jobresponsibilities","duty","duties",
+    "jobduty","job_duty","postduties","post_duties","workduty","work_duties",
+    "jobrequirement","job_requirement","jobrequirements","requirementsdesc",
+    "requirements_description","abilityrequirement","ability_requirement",
+    "competency","competencies",
+)}
 def first(fields:list[str],names)->str|None:
     lookup={x.lower():x for x in fields}
     for name in names:

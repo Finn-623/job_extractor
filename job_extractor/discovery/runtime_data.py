@@ -23,7 +23,7 @@ ID_KEY = re.compile(r"(?i)^(id|job_?id|jobid|position_?id|positionid|requisition
 TITLE_KEY = re.compile(r"(?i)^(title|job_?title|jobtitle|position_?name|positionname|name)$")
 LOCATION_KEY = re.compile(r"(?i)^(location|locations|city|city_?name|cityname|province|province_?name|country|workplace)$")
 DEPARTMENT_KEY = re.compile(r"(?i)^(department|team|category|category_?name|function|zhineng|dept|dept_?name)$")
-JD_KEY = re.compile(r"(?i)^(description|job_?description|jobdescription|content|responsibility|responsibilities|requirement|requirements|qualification|qualifications|overview|jd)$")
+JD_KEY = re.compile(r"(?i)^(description|job_?desc(ription)?|jobdesc|position_?desc(ription)?|content|jd_?content|jd|overview|summary|work_?content|job_?body|detail_?desc(ription)?|post_?content|rich_?text|desc|responsibilit(y|ies)|dut(y|ies)|requirement(s)?|qualification(s)?|competenc(y|ies))$")
 _EXTRA_SECRET_KEY = re.compile(r"(?i)(aes[_-]?iv|necromancer|encrypt|decrypt|cipher|passwd|password|token|secret|session|csrf|signature|cookie|auth|api[_-]?key|access[_-]?key|(^|_)key$)")
 
 

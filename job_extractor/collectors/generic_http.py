@@ -11,6 +11,7 @@ from job_extractor.discovery.network_analyzer import safe_business_data
 from job_extractor.collectors.generic_detail import GenericHtmlDetailCollector,GenericHttpDetailCollector,GenericDomDetailCollector,extract_path,split_jd
 from job_extractor.discovery.dom_semantics import credible_jd
 from job_extractor.discovery.dynamic import graphql_next_values,pagination_stop
+from job_extractor.field_semantics import canonical_jd,needs_detail_fetch,pick_jd_fields
 from job_extractor.identity import job_identity
 from job_extractor.planning.execution_contract import PlanContractError,transport_gaps
 
@@ -49,6 +50,30 @@ def nested_text(value:Any,*paths:str)->str|None:
     return None
 def lines(value:Any)->list[str]:
     return [x.strip() for x in str(value or "").replace("\r","").split("\n") if x.strip()]
+JD_VALUE_FIELDS=frozenset({"description","overview","content","jobDescription",
+    "responsibilities","requirements","qualifications"})
+
+def _merge_detail(raw:dict,detail:Any)->dict:
+    """Merge an official detail payload into a list record, enrichment-only.
+
+    A detail field never overwrites an existing non-empty list value: the
+    merge is non-empty-enrichment-only. Provenance of detail data is kept in
+    ``_generic_detail_source`` so downstream stages can tell list-level and
+    detail-level values apart. Malformed strings (lone surrogates) are
+    normalized so one bad character cannot poison the whole record.
+    """
+    if not isinstance(detail,dict):return raw
+    merged=dict(raw)
+    for key,value in detail.items():
+        if value in (None,"",[],{}):continue
+        current=merged.get(key)
+        if current in (None,"",[],{}):merged[key]=value
+        elif isinstance(value,str) and isinstance(current,str) and key in JD_VALUE_FIELDS:
+            # Full JD truth wins: a credible detail body replaces a list value
+            # that is only a teaser/summary. Never the other way around.
+            if credible_jd(value) and not credible_jd(current):merged[key]=value
+    merged.setdefault("_generic_detail_source","DETAIL_API")
+    return merged
 def _raw_detail_url(raw:dict,plan:CollectionPlan)->str|None:
     value=extract_path(raw,plan.detail_url_field) if plan.detail_url_field else None
     if not value:value=pick(raw,("absolute_url","url","job_url","jobUrl","detail_url","detailUrl","apply_url","applyUrl","click_url","clickUrl"))
@@ -127,12 +152,27 @@ class GenericHttpCollector:
         if isinstance(location,list):locations=[x for x in (text(y) for y in location) if x]
         elif isinstance(location,dict):locations=[x for x in (text(location),) if x]
         elif text(location):locations=[text(location)]
-        dto=raw.get("projectPositionDto") if isinstance(raw.get("projectPositionDto"),dict) else {}
-        description=pick(raw,("_generic_description","description","content","jobDescription")) or dto.get("jobResponsibility"); requirements=pick(raw,("requirements","requirement","qualifications")) or dto.get("jobRequirement")
-        full=text(description) if raw.get("_generic_description") is not None else ("\n\n".join(x for x in (text(description),text(requirements)) if x) or None)
-        responsibilities,parsed_requirements=split_jd(full)
-        resp_lines=raw.get("_generic_responsibilities") if isinstance(raw.get("_generic_responsibilities"),list) else (responsibilities if raw.get("_generic_description") is not None else lines(description))
-        req_lines=raw.get("_generic_requirements") if isinstance(raw.get("_generic_requirements"),list) else (lines(requirements) or parsed_requirements)
+        # STEP 51: generic JD recognition. Field-name vocabularies live in
+        # field_semantics; no site-specific branches here.
+        recognized=pick_jd_fields(raw)
+        full,jd_state,_,_=canonical_jd(raw)
+        if raw.get("_generic_description") is not None:
+            responsibilities,parsed_requirements=split_jd(full)
+            resp_lines=raw.get("_generic_responsibilities") if isinstance(raw.get("_generic_responsibilities"),list) else responsibilities
+            req_lines=raw.get("_generic_requirements") if isinstance(raw.get("_generic_requirements"),list) else parsed_requirements
+        else:
+            resp_value=recognized["responsibilities"]
+            req_value=recognized["requirements"]
+            body=recognized["description"]
+            generic_resp=raw.get("_generic_responsibilities") if isinstance(raw.get("_generic_responsibilities"),list) else None
+            generic_req=raw.get("_generic_requirements") if isinstance(raw.get("_generic_requirements"),list) else None
+            # Legacy-compatible line mapping, generalized to the recognized
+            # vocabularies: an explicit responsibility field wins, otherwise
+            # the description body doubles as the responsibilities lines;
+            # an explicit requirement field wins, otherwise requirements are
+            # derived from the canonical JD via heading splitting.
+            resp_lines=generic_resp if generic_resp is not None else (lines(resp_value) if resp_value is not None else lines(body))
+            req_lines=generic_req if generic_req is not None else (lines(req_value) if req_value is not None else split_jd(full)[1])
         detail=pick(raw,("_generic_detail_url",)) or _raw_detail_url(raw,self.plan)
         if not detail and self.plan.detail_endpoint_template and "{id}" in self.plan.detail_endpoint_template:
             detail=self.plan.detail_endpoint_template.replace("{id}",str(source_jid))
@@ -142,7 +182,9 @@ class GenericHttpCollector:
         return Job(company=self.plan.company,job_id=identity["identity_value"],job_title=title,locations=locations,department=department,
             job_category=category,recruitment_type=recruitment,responsibilities=resp_lines,requirements=req_lines,
             full_jd=full,detail_url=detail if isinstance(detail,str) else None,apply_url=detail if isinstance(detail,str) else None,
-            source_url=self.plan.source_url,raw_data={**safe_business_data(raw),"_identity":identity})
+            source_url=self.plan.source_url,
+            raw_data={**safe_business_data(raw),"_identity":identity,"_jd_state":jd_state,
+                      "_jd_source_fields":{key:recognized[key+"_field"] for key in ("description","responsibilities","requirements") if recognized[key+"_field"]}})
     def collect(self)->CollectionResult:
         gaps=transport_gaps(self.plan)
         if gaps:
@@ -207,16 +249,25 @@ class GenericHttpCollector:
         else:
             errors.append(make_error("PAGINATION_LIMIT","max pages reached"));termination="MAX_PAGES"
         self.recorder.set_termination(termination or "UNKNOWN")
-        if self.plan.detail_mode in ("DETAIL_REQUIRED","DETAIL_FALLBACK") and self.plan.detail_endpoint_template and "{id}" in self.plan.detail_endpoint_template:
+        detail_template = self.plan.detail_endpoint_template if self.plan.detail_endpoint_template and "{id}" in self.plan.detail_endpoint_template else None
+        has_record_detail_url = any(_raw_detail_url(raw, self.plan) for raw in raws)
+        if self.plan.detail_mode in ("DETAIL_REQUIRED","DETAIL_FALLBACK") and (detail_template or has_record_detail_url):
             for index,raw in enumerate(raws):
-                needs=self.plan.detail_mode=="DETAIL_REQUIRED" or not pick(raw,("description","content","jobDescription"))
-                if not needs:continue
+                # STEP 51: per-job trigger uses generic JD recognition — a
+                # list record that already carries credible JD content is not
+                # re-fetched, even in DETAIL_FALLBACK mode.
+                if not needs_detail_fetch(raw,self.plan.detail_mode):continue
                 if self.clock()>=deadline:
                     errors.append(make_error("COLLECTION_DEADLINE_EXCEEDED","detail enrichment budget exhausted"));self.recorder.set_termination("DEADLINE_EXCEEDED");break
                 jid=pick(raw,(self.plan.detail_id_field,)+ID_FIELDS if self.plan.detail_id_field else ID_FIELDS)
                 try:
-                    detail=GenericHttpDetailCollector(self.plan,self.client).fetch(str(jid))
-                    merged={**raw,**detail} if isinstance(detail,dict) else raw
+                    # Prefer the observed plan template; when no template was
+                    # recorded, use this record's own detail URL.
+                    endpoint = None if detail_template else _raw_detail_url(raw, self.plan)
+                    if not detail_template and not endpoint:
+                        continue
+                    detail=GenericHttpDetailCollector(self.plan,self.client).fetch(str(jid), endpoint=endpoint)
+                    merged=_merge_detail(raw,detail)
                     jd=pick(merged,("description","overview","content","jobDescription","responsibilities","requirements","qualifications"))
                     success=credible_jd(str(jd or ""));self.recorder.record_detail_request(success)
                     if success:raws[index]=merged

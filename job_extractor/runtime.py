@@ -105,11 +105,46 @@ def evaluate_data_completeness(result: CollectionResult) -> DataCompleteness:
     missing_jd=sum(not j.full_jd for j in result.jobs)
     missing_req=sum(not j.requirements for j in result.jobs)
     missing_resp=sum(not j.responsibilities for j in result.jobs)
-    source_incomplete=sum(not j.requirements or not j.responsibilities for j in result.jobs)
+    # STEP 51: a full JD body present at the source means structured
+    # requirement/responsibility fields simply do not exist there — the JD is
+    # still complete. Only a job with no usable JD text is source_incomplete.
+    def _meaningful_jd(job: Any) -> bool:
+        state = job.raw_data.get("_jd_state") if isinstance(job.raw_data, dict) else None
+        if state in ("FULL_TEXT", "SPLIT"):
+            return True
+        # ``SUMMARY`` is an explicit recognition result: the source body was
+        # present but did not meet the generic credible-JD threshold.  A
+        # normalized responsibilities projection must not turn that teaser
+        # into a fake complete JD.
+        if state == "SUMMARY":
+            return False
+        jd = job.full_jd or ""
+        return len(jd) >= 160 or bool(job.requirements) or bool(job.responsibilities)
+    jd_complete=sum(bool(j.full_jd) and _meaningful_jd(j) for j in result.jobs)
+    jd_incomplete=total-jd_complete
+    # This diagnostic describes the source schema, not the normalized
+    # ``requirements`` projection.  A whole-JD body can be split into
+    # convenience columns by the collector while the source still had no
+    # independent requirements field; that remains SOURCE_REQUIREMENTS_ABSENT
+    # and must not make an otherwise complete JD incomplete.
+    source_requirements_absent=sum(
+        bool(j.full_jd) and _meaningful_jd(j)
+        and not (isinstance(j.raw_data, dict)
+                 and j.raw_data.get("_jd_source_fields", {}).get("requirements"))
+        for j in result.jobs)
+    source_incomplete=jd_incomplete
+    metrics=getattr(result,"metrics",None)
     return DataCompleteness(total_jobs=total,complete_jobs=total-missing_jd,
         missing_jd_jobs=missing_jd,missing_requirements_jobs=missing_req,
         missing_responsibilities_jobs=missing_resp,source_incomplete_jobs=source_incomplete,
-        completeness_ratio=round((total-missing_jd)/total,6) if total else 1.0)
+        completeness_ratio=round((total-missing_jd)/total,6) if total else 1.0,
+        jd_complete=jd_complete,jd_incomplete=jd_incomplete,
+        list_sufficient=sum(isinstance(j.raw_data,dict) and j.raw_data.get("_jd_state") in ("FULL_TEXT","SPLIT") for j in result.jobs),
+        detail_required=sum(isinstance(j.raw_data,dict) and j.raw_data.get("_jd_state") in ("SUMMARY","ABSENT") for j in result.jobs),
+        detail_attempted=getattr(metrics,"details_attempted",0) if metrics else 0,
+        detail_succeeded=getattr(metrics,"details_succeeded",0) if metrics else 0,
+        detail_failed=getattr(metrics,"details_failed",0) if metrics else 0,
+        source_requirements_absent=source_requirements_absent)
 
 def finalize_result(result: CollectionResult, adapter: BaseAdapter) -> CollectionResult:
     result.scope = _scope(adapter); result.metrics = _metrics(adapter)

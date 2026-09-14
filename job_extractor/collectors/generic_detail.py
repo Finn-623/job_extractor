@@ -46,10 +46,15 @@ def extract_path(value:Any,path:str|None)->Any:
 class GenericHttpDetailCollector:
     """Executes only the explicit detail template recorded in a validated plan."""
     def __init__(self,plan:CollectionPlan,client):self.plan=plan;self.client=client
-    def fetch(self,job_id:str)->dict[str,Any]|None:
-        template=self.plan.detail_endpoint_template
-        if not template or "{id}" not in template:return None
-        response=self.client.request(self.plan.detail_method or "GET",template.format(id=job_id))
+    def fetch(self,job_id:str, endpoint:str|None=None)->dict[str,Any]|None:
+        # A validated plan normally supplies an observed ``{id}`` template.
+        # Some list APIs expose an observed per-record detail URL instead;
+        # accepting that URL keeps the trigger generic without inventing a
+        # site-specific route.
+        template=endpoint or self.plan.detail_endpoint_template
+        if not template:return None
+        url=template.format(id=job_id) if "{id}" in template else template
+        response=self.client.request(self.plan.detail_method or "GET",url)
         response.raise_for_status();payload=response.json()
         detail=extract_path(payload,self.plan.detail_path) if self.plan.detail_path else payload
         return detail if isinstance(detail,dict) else None

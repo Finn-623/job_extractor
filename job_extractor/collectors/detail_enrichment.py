@@ -21,7 +21,16 @@ EXTRACTION_FAILED = "EXTRACTION_FAILED"
 BINDING_MISMATCH = "BINDING_MISMATCH"
 NO_CHANGE = "NO_CHANGE"
 
-DESCRIPTION_FIELDS = ("jobDescription", "description", "job_description", "content", "requirementsDescription")
+DESCRIPTION_FIELDS = (
+    "jobDescription", "description", "job_description", "content",
+    "requirementsDescription",
+    # STEP 51: extend with the generic description-style vocabulary (superset).
+    "positionDescription", "position_description", "jobdesc", "jobDesc",
+    "jd_content", "jdContent", "jd", "overview", "summary", "workContent",
+    "work_content", "jobBody", "job_body", "detailDescription",
+    "detail_description", "postContent", "post_content", "richText",
+    "rich_text", "desc",
+)
 
 
 def _normalize(value: Any) -> str:
