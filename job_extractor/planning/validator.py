@@ -45,6 +45,9 @@ class CollectionPlanValidator:
                     if not source.get("offset_field") or not source.get("limit_field"):errors.append("RUNTIME_PAGINATION_FIELDS_MISSING")
                     if source.get("trigger_mode") not in ("OFFSET_PAGE","OFFSET_BUTTON"):errors.append("RUNTIME_TRIGGER_UNSAFE")
                     if not source.get("pagination_validated"):errors.append("RUNTIME_PAGINATION_NOT_VALIDATED")
+            paginated=source.get("pagination_model") in ("OFFSET","PAGE") or bool(source.get("pagination"))
+            if paginated and not (isinstance(source.get("total"),int) and source.get("total")>0) and not (source.get("terminal_page_signal") or source.get("has_more_field")):
+                errors.append("RUNTIME_TERMINATION_STRATEGY_MISSING")
         elif plan.mode=="DOM":
             if not plan.allowed_detail_urls:errors.append("DOM_LINKS_MISSING")
             source_host=urlsplit(plan.source_url).hostname

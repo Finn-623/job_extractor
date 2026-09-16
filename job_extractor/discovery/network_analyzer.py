@@ -61,14 +61,45 @@ def find_field(value: Any,names: set[str],max_depth: int=4,depth: int=0,prefix: 
         found=find_field(v,names,max_depth,depth+1,path)
         if found:return found
     return None
-TOTAL_TIER1={"total","totalcount","total_count","totalelements","total_elements","recordstotal","records_total"}
+TOTAL_TIER1={"total","totalcount","total_count","totalsize","totalelements","total_elements","recordstotal","records_total","datacount"}
 TOTAL_TIER2={"count"}
+
+def _integer(value: Any) -> int|None:
+    if isinstance(value,bool):return None
+    if isinstance(value,int):return value
+    if isinstance(value,float) and value.is_integer():return int(value)
+    if isinstance(value,str) and value.strip().isdigit():return int(value.strip())
+    return None
+
+def find_total_field(value: Any,list_length: int|None=None) -> str|None:
+    """Find a credible semantic total, rejecting totals below a non-empty list.
+
+    Some public envelopes expose a stale/invalid ``Total=0`` beside a stable
+    ``Count``.  A non-empty observed list disproves that zero total; continue
+    to the lower-priority count field rather than treating page one as final.
+    """
+    for names in (TOTAL_TIER1,TOTAL_TIER2):
+        for path, key, item in _iter_fields(value):
+            number=_integer(item)
+            if key.lower() in names and number is not None:
+                if isinstance(list_length,int) and list_length>0 and number<list_length:
+                    continue
+                return path
+    return None
+
+def _iter_fields(value: Any,max_depth: int=4,depth: int=0,prefix: str=""):
+    if depth>max_depth or not isinstance(value,dict):return
+    for key,item in list(value.items())[:100]:
+        path=f"{prefix}.{key}" if prefix else key
+        yield path,key,item
+        yield from _iter_fields(item,max_depth,depth+1,path)
+
 def response_shape(value: Any) -> dict[str,Any]:
     if not isinstance(value,(dict,list)):return {}
     path,length,items=list_observation(value); fields=sorted({str(k) for x in items if isinstance(x,dict) for k in list(x)[:100]})[:100]
     return {"top_level_keys":sorted(value.keys())[:100] if isinstance(value,dict) else [],
             "candidate_list_path":path,"sample_field_names":fields,"array_length":length,"sampled_items":len(items),
-            "total_field":find_field(value,TOTAL_TIER1) or find_field(value,TOTAL_TIER2)}
+            "total_field":find_total_field(value,length)}
 def get_path(value:Any,path:str|None)->Any:
     if not path:return None
     for part in (path or "").split("."):

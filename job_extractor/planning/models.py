@@ -34,6 +34,21 @@ class CollectionPlan(BaseModel):
     detail_id_field:str|None=None
     detail_path:str|None=None
     detail_url_field:str|None=None
+    # STEP 54B: minimal generic runtime detail contract. The body template
+    # carries literal values observed in the organic detail request (scope
+    # values such as org/site ids come from that observed evidence, never
+    # hardcoded) plus a "{id}" placeholder substituted per job. The decoder
+    # is a generic response-transform contract (e.g. AES_CBC_ENVELOPE with
+    # the iv sourced from runtime state evidence).
+    detail_body_template:dict[str,Any]=Field(default_factory=dict)
+    detail_decoder:dict[str,Any]=Field(default_factory=dict)
+    detail_jd_field:str|None=None
+    # STEP 54B: where the job record lives inside the decoded detail response,
+    # derived from organic response evidence at discovery time (empty list =
+    # the decoded payload itself is the job record; e.g. ["data"] = it is
+    # nested inside a generic business-result wrapper). Execution-layer
+    # concern only — the transport decoder never unwraps business payloads.
+    detail_result_path:list[str]=Field(default_factory=list)
     detail_title_selector:str|None=None
     detail_location_selector:str|None=None
     detail_department_selector:str|None=None

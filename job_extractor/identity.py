@@ -30,12 +30,22 @@ def canonical_url(url:str|None)->str|None:
 def _url_identifier(url:str|None):
     if not url:return None,None
     parsed=urlsplit(url)
+    # SPA detail routes commonly place the real record id in ``#/job/<id>``;
+    # path segments before the hash are often tenant/project identifiers and
+    # must never win over the terminal route identifier.
+    fragment_segments=[x for x in parsed.fragment.split("/") if x]
+    for segment in reversed(fragment_segments):
+        if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}",segment):return segment.lower(),"detail_url_fragment_uuid"
+        if re.fullmatch(r"(?=.*\d)[A-Za-z0-9-]{5,}",segment) and sum(c.isdigit() for c in segment)>=5:return segment,"detail_url_fragment_id"
+    segments=[x for x in parsed.path.split("/") if x]
+    job_routes={"job","jobs","position","positions","post","posts","job-detail","jobdetail","detail","details"}
+    for index,segment in enumerate(segments[:-1]):
+        if segment.lower() not in job_routes:continue
+        value=segments[index+1]
+        if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}",value):return value.lower(),"detail_url_path_uuid"
+        if re.fullmatch(r"(?=.*\d)[A-Za-z0-9-]{3,}",value):return value,"detail_url_path_id"
     for key,value in parse_qsl(parsed.query):
         if key.lower() in REQUISITION_FIELDS+JOB_FIELDS+STABLE_FIELDS and value:return value,f"query:{key}"
-    segments=[x for x in parsed.path.split("/") if x]
-    for segment in segments:
-        if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}",segment):return segment.lower(),"detail_url_uuid"
-        if re.fullmatch(r"(?=.*\d)[A-Za-z0-9-]{5,}",segment) and (sum(c.isdigit() for c in segment)>=5):return segment,"detail_url_path_id"
     return None,None
 
 def job_identity(raw:dict[str,Any]|None=None,detail_url:str|None=None,title:str|None=None,location:Any=None,department:str|None=None,company:str|None=None)->dict[str,str]:

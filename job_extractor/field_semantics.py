@@ -11,7 +11,9 @@ def canonical(name: str) -> str:
 
 ROLE_SUFFIXES = {
     "id": ("jobid", "positionid", "postingid", "postid", "requisitionid"),
-    "title": ("jobtitle", "positionname", "positiontitle", "postingtitle", "requisitiontitle"),
+    # Public job-list APIs commonly use jobName/postName/jobAdName.  These
+    # are structural role names, not provider-specific vocabulary.
+    "title": ("jobtitle", "jobname", "jobadname", "positionname", "positiontitle", "postingtitle", "postname", "requisitiontitle"),
     "location": ("location", "locations", "city", "cityname", "workplace", "workplacename", "workplacecode"),
     "category": ("department", "departmentname", "team", "category", "categoryname", "jobfunction", "functionname"),
     "responsibilities": ("description", "jobdescription", "responsibility", "responsibilities", "jobresponsibility", "duties", "postduties"),
@@ -86,7 +88,10 @@ JD_DESCRIPTION_FIELDS = (
     "_generic_description",   # internal detail-enrichment provenance (highest priority)
     "jobDescription", "job_description", "jobdesc", "jobDesc",
     "description", "positionDescription", "position_description",
-    "content", "jd_content", "jdContent", "jd", "overview", "summary",
+    # ``contents`` is the generic plural form of ``content`` used by public
+    # job-list APIs. Exact-key alias only: containing keys such as
+    # ``contentStatus`` / ``contentsCount`` / ``contentType`` never match.
+    "content", "contents", "jd_content", "jdContent", "jd", "overview", "summary",
     "workContent", "work_content", "jobBody", "job_body",
     "detailDescription", "detail_description", "postContent", "post_content",
     "richText", "rich_text", "desc",
@@ -106,6 +111,10 @@ JD_RESPONSIBILITY_FIELDS = (
 JD_REQUIREMENT_FIELDS = (
     "_generic_requirements",  # internal detail-enrichment provenance
     "jobRequirement", "job_requirement", "requirements", "requirement",
+    # ``require`` is a complete field name used by public list APIs.  It is
+    # deliberately an exact alias, not a substring rule: ``requireLogin``
+    # and ``requiredCount`` are unrelated metadata.
+    "require",
     "qualifications", "qualification", "jobRequirements", "requirementsDesc",
     "requirements_description", "abilityRequirement", "ability_requirement",
     "competency", "competencies",
@@ -145,6 +154,12 @@ JD_FIELD_PATTERN = re.compile(
     r"requirement(s)?|qualification(s)?|desc(ription)?)$"
 )
 
+# Two tiny values under the newly supported exact ``duty`` / ``require``
+# aliases are metadata teasers, not an evidenced full posting.  This
+# deliberately modest floor is confined to that new pair so established split
+# aliases retain their STEP51 semantics.
+MIN_SPLIT_JD_CHARS = 40
+
 
 def _string_value(value: Any) -> str | None:
     """Return a non-empty plain string for scalar-ish JD values, else None."""
@@ -161,10 +176,25 @@ def _string_value(value: Any) -> str | None:
 
 def _pick_fields(raw: dict, names: tuple[str, ...]) -> tuple[str | None, str | None]:
     """First non-empty value among *names* (top level), plus its field name."""
+    # Preserve the established alias priority and exact-key behavior whenever
+    # an exact spelling is available.  Source schemas are nevertheless case
+    # insensitive at the field-name level: ``Duty`` and ``DUTY`` are the same
+    # generic semantic field as ``duty``.  This is exact normalized-key
+    # matching only; it never treats a containing key such as ``requireLogin``
+    # as ``require``.
     for name in names:
         value = _string_value(raw.get(name))
         if value is not None:
             return value, name
+    casefolded: dict[str, list[str]] = {}
+    for key in raw:
+        if isinstance(key, str):
+            casefolded.setdefault(key.casefold(), []).append(key)
+    for name in names:
+        for actual_name in casefolded.get(name.casefold(), []):
+            value = _string_value(raw.get(actual_name))
+            if value is not None:
+                return value, actual_name
     return None, None
 
 
@@ -208,7 +238,14 @@ def pick_jd_fields(raw: dict) -> dict[str, Any]:
     if description is not None:
         state = "FULL_TEXT"
     elif responsibilities is not None or requirements is not None:
-        state = "SPLIT"
+        new_short_alias_pair = (
+            isinstance(responsibilities_field, str) and responsibilities_field.casefold() == "duty"
+            and isinstance(requirements_field, str) and requirements_field.casefold() == "require"
+        )
+        if responsibilities is not None and requirements is not None and new_short_alias_pair and len(responsibilities.strip()) + len(requirements.strip()) < MIN_SPLIT_JD_CHARS:
+            state = "SUMMARY"
+        else:
+            state = "SPLIT"
     else:
         state = "ABSENT"
     # A whole-JD body that is too short to be a real JD is only a summary, not
@@ -353,4 +390,4 @@ def canonical_jd(raw: dict) -> tuple[str | None, str, list[str], list[str]]:
         if requirements is not None:
             parts.append("任职要求\n" + requirements.strip())
         return ("\n\n".join(parts) or None), state, [], []
-    return None, "ABSENT", [], []
+    return None, ("SUMMARY" if state == "SUMMARY" else "ABSENT"), [], []

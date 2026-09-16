@@ -1,11 +1,50 @@
-# Job Extractor
+# Job Extractor (V1)
+
+对官方招聘页面 URL 自动发现数据源、采集全量职位列表、做有证据支撑的详情补全，并输出诚实标注完整性的报告（JSON / Excel / Markdown）。
 
 ## Platforms
 
 - Zhiye — READY
 - Moka — READY
 - Feishu — READY (Playwright browser runtime)
-- Generic — detection only
+- Generic — READY (V1：source discovery → generic plan → collection → detail enrichment → reporting)
+
+## V1 使用
+
+```bash
+python main.py "<招聘页面URL>"
+```
+
+示例：
+
+```bash
+python main.py "https://careers.geelytech.com/campus"
+```
+
+默认运行全流程：source discovery → 采集计划 → 全量列表采集 →（有证据时）详情补全 → 报告输出。也可分步：`--discover`（只观测数据源）、`--plan`（生成采集计划）、`--collect-generic`（发现并执行采集）。
+
+### 输出位置与格式
+
+每次采集在 `~/.job_extractor/output/` 生成一个运行目录：
+
+```text
+jobs.json     机器可读，source of truth
+jobs.xlsx     Summary / Jobs / Data Quality 三个 sheet
+report.md     Markdown 报告（>50 jobs 自动切换紧凑摘要）
+```
+
+### Completeness / fail-closed 语义
+
+- 每个 job 的 JD 完整性逐条诚实计数：`FULL_TEXT`（全文）、`SUMMARY`（源站只给短摘要）、`ABSENT`（无 JD 字段）。
+- 源站只提供短摘要时，系统**不会自行补全 JD**，只如实标记 incomplete；缺证据时 detail enrichment 不猜测。
+- 无伪造 JD：所有 JD 内容均来自源站字段。
+
+### 已知边界（Post-V1）
+
+- 源站仅提供 teaser/短摘要（如 AECC）→ 该站 JD 完整率受限，fail-closed。
+- 源站无可观察的 identity-bound detail source（如 Sinomach）→ JD 仅限列表级。
+- 上游偶发重复投递（如 Hisense）→ 稳定 ID 去重正确合并，unique 数可能低于 reported_total。
+- 少量 DETAIL_EMPTY → fail-closed 标记 incomplete。
 
 ## Unified JSON output
 

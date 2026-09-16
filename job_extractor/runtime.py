@@ -140,7 +140,10 @@ def evaluate_data_completeness(result: CollectionResult) -> DataCompleteness:
         completeness_ratio=round((total-missing_jd)/total,6) if total else 1.0,
         jd_complete=jd_complete,jd_incomplete=jd_incomplete,
         list_sufficient=sum(isinstance(j.raw_data,dict) and j.raw_data.get("_jd_state") in ("FULL_TEXT","SPLIT") for j in result.jobs),
-        detail_required=sum(isinstance(j.raw_data,dict) and j.raw_data.get("_jd_state") in ("SUMMARY","ABSENT") for j in result.jobs),
+        # STEP 54B: required = pre-fetch gate count from the detail stage when
+        # available; post-merge state counts drift downward as detail payloads
+        # upgrade job records (the 7-vs-182 semantics drift).
+        detail_required=getattr(metrics,"details_required",0) if metrics else sum(isinstance(j.raw_data,dict) and j.raw_data.get("_jd_state") in ("SUMMARY","ABSENT") for j in result.jobs),
         detail_attempted=getattr(metrics,"details_attempted",0) if metrics else 0,
         detail_succeeded=getattr(metrics,"details_succeeded",0) if metrics else 0,
         detail_failed=getattr(metrics,"details_failed",0) if metrics else 0,

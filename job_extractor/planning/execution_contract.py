@@ -15,6 +15,7 @@ GAP_REASONS={
     "TERMINATION_STRATEGY":"MISSING_TERMINATION_STRATEGY",
     "ALLOWED_DETAIL_URLS":"MISSING_ALLOWED_DETAIL_URLS",
     "RUNTIME_SOURCE":"MISSING_RUNTIME_SOURCE",
+    "RUNTIME_TERMINATION_STRATEGY":"MISSING_RUNTIME_TERMINATION_STRATEGY",
 }
 
 class PlanContractError(ValueError):
@@ -35,6 +36,12 @@ def missing_fields(plan:Any)->list[str]:
     missing:list[str]=[]
     if mode=="BROWSER_RUNTIME_DATA":
         if not plan.runtime_source:missing.append("RUNTIME_SOURCE")
+        else:
+            source=plan.runtime_source
+            paginated=source.get("pagination_model") in ("OFFSET", "PAGE") or bool(source.get("pagination"))
+            terminal=source.get("terminal_page_signal") or source.get("has_more_field")
+            if paginated and not (isinstance(source.get("total"),int) and source.get("total")>0) and not terminal:
+                missing.append("RUNTIME_TERMINATION_STRATEGY")
         return missing
     if mode=="DOM":
         if not plan.allowed_detail_urls:missing.append("ALLOWED_DETAIL_URLS")

@@ -5,7 +5,7 @@ INFERENCE_SOURCE="request_response_schema"
 PAGE_NAMES={"page","pageno","pagenum","pageindex","pagenumber","currentpage","current","currentpageindex"}
 OFFSET_NAMES={"offset","start","startindex","from","fromindex","skip"}
 SIZE_NAMES={"pagesize","size","limit","pagelimit","rows","perpage"}
-TOTAL_TIER1={"total","totalcount","total_count","totalelements","total_elements","recordstotal","records_total"}
+TOTAL_TIER1={"total","totalcount","total_count","totalsize","totalelements","total_elements","recordstotal","records_total","datacount"}
 TOTAL_TIER2={"count"}
 _MAX_DEPTH=4
 _MAX_KEYS=100
@@ -33,12 +33,23 @@ def find_total(response:Any,list_length:int|None=None)->tuple[str|None,int|None]
     for names in (TOTAL_TIER1,TOTAL_TIER2):
         for item_path,key,item,_index,_depth in iter_fields(response):
             if _compact(key) in names and _as_int(item) is not None:
-                return item_path,int(item)
+                number=int(item)
+                if isinstance(list_length,int) and list_length>0 and number<list_length:
+                    continue
+                return item_path,number
     return None,None
 
 def infer_pagination_from_schema(request_body:dict[str,Any]|None,query:dict[str,str|None]|None,response:Any,list_length:int|None=None)->dict[str,Any]:
     """Infer PAGE/OFFSET pagination from request+response schema alone (first-page capable, generic)."""
     evidence:list[str]=[]
+    # Total credibility needs the observed job-list length.  When the caller
+    # did not supply one, derive it from the response with the same generic
+    # array metric response_shape uses, so both total selectors stay
+    # consistent for stale/invalid low totals beside a credible Count.
+    if list_length is None:
+        from job_extractor.discovery.network_analyzer import find_array_info
+        arrays=find_array_info(response)
+        if arrays:list_length=max(arrays,key=lambda x:x[1])[1]
     advancing:dict[str,list[tuple[int,int,str,str,Any]]]={"page":[],"offset":[]}
     sizes:list[tuple[int,int,str,str,Any]]=[]
     for origin,source in (("request.body",request_body if isinstance(request_body,dict) else {}),("request.query",query if isinstance(query,dict) else {})):

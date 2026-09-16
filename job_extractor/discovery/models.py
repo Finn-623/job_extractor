@@ -36,7 +36,7 @@ class ApiCandidate(BaseModel):
     observed_phase: str|None = None
 
 class CandidateSource(BaseModel):
-    source_type: Literal["NETWORK_JSON","GRAPHQL","SERIALIZED_STATE","DOM_LIST","IFRAME","EMBEDDED_WIDGET"]
+    source_type: Literal["NETWORK_JSON","GRAPHQL","SERIALIZED_STATE","RUNTIME_STATE","DOM_LIST","IFRAME","EMBEDDED_WIDGET"]
     url: str|None = None
     status: Literal["CANDIDATE","REJECTED","OBSERVED","NONE"] = "OBSERVED"
     score: int = 0
@@ -96,6 +96,11 @@ class RuntimeJobSource(BaseModel):
     trigger_mode: Literal["OFFSET_PAGE","OFFSET_BUTTON","OFFSET_SCROLL","OTHER","UNKNOWN"] = "UNKNOWN"
     pagination_validated: bool = False
     records: list[dict[str,Any]] = Field(default_factory=list)
+    # STEP 54B: generic detail-request contract observed from runtime
+    # evidence (an organically triggered detail request + its response
+    # shape + runtime state values). Empty when no trustworthy detail
+    # request was observed; consumers must then fail safe (no fabricated JD).
+    detail_contract: dict[str,Any] = Field(default_factory=dict)
     confidence: Literal["LOW","MEDIUM","HIGH"] = "LOW"
     executable: bool = False
     evidence: list[str] = Field(default_factory=list)
@@ -352,6 +357,8 @@ class NetworkSummary(BaseModel):
     json_candidates: int = 0
     job_api_candidates: int = 0
     phase_json_candidates: dict[str,int] = Field(default_factory=dict)
+    observation_policy: dict[str,Any] = Field(default_factory=dict)
+    boot_recovery: dict[str,Any] = Field(default_factory=dict)
 
 class DiscoveryResult(BaseModel):
     source_url: str

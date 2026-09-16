@@ -9,6 +9,8 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from job_extractor.browser import BrowserRuntime,BrowserRuntimeError
 from job_extractor.discovery.models import ApiCandidate,CandidateSource,DiscoveryResult,ListContainer,NetworkSummary,PaginationDetection,RejectedCandidate,VisibleTotalEvidence,ProvenanceRecord,TerminalActivationTrace,RecruitmentAction
 from job_extractor.discovery.network_analyzer import request_shape,response_shape,safe_url,sanitized_values,find_field,get_path,list_observation,safe_business_data
+from job_extractor.discovery.observation import ActivityClock,wait_for_activity_quiet,url_is_job_semantic
+from job_extractor.discovery.boot_recovery import classify_boot_state,reload_allowed
 from job_extractor.discovery.pagination_semantics import infer_pagination_from_schema
 from job_extractor.discovery.scorer import confidence,reliable_list_candidate,score_detail,score_list
 from job_extractor.discovery.dom_semantics import extract_company,extract_detail_dom,filter_detail_links,first_real_url,related_detail_hosts,repeated_job_cards,repeated_job_links,route_changed,semantic_html_detail
@@ -209,7 +211,8 @@ class GenericApiDetector:
     def discover(self,url:str,budget=None,terminal_mode:bool=False,upstream_entry_action:RecruitmentAction|None=None)->DiscoveryResult:
         started=datetime.now(); clock=perf_counter(); observations=[]; phase=["TERMINAL_INITIAL" if terminal_mode else "INITIAL"]; summary=NetworkSummary(); dom={};detail_dom={};warnings=[];company=None;pagination_override=None;inventory=[];total_evidence=[];total_conflict=False;entries=[]
         terminal_trace=TerminalActivationTrace(terminal_url=url,scope="UNKNOWN",activation_started_at=started,upstream_entry_action=upstream_entry_action) if terminal_mode else None
-        terminal_network=[];terminal_dom=[];terminal_actions=[];terminal_states=[];terminal_frames=[];runtime_source=None
+        terminal_network=[];terminal_dom=[];terminal_actions=[];terminal_states=[];terminal_frames=[];runtime_source=None;internal_trace=[]
+        activity_clock=ActivityClock();boot_reload_count=0;boot_attempts=[];domcontentloaded=False
         def _expired():return (perf_counter()-clock)>self.source_budget_seconds
         try:
             with self.browser_factory(timeout_ms=self.timeout_ms) as runtime:
@@ -237,6 +240,7 @@ class GenericApiDetector:
                 def observe(response):
                     summary.observed_requests+=1
                     request=response.request
+                    if request.resource_type in ("xhr","fetch"):activity_clock.record_activity(request.url)
                     if terminal_mode:
                         record={"phase":phase[0],"action_id":phase[0] if phase[0].startswith("TERMINAL_ACTION_") else None,"url":safe_url(request.url)[0],"method":request.method,"resource_type":request.resource_type,"status":response.status,"content_type":response.headers.get("content-type") or ""}
                         try:
@@ -257,20 +261,104 @@ class GenericApiDetector:
                     except Exception:return
                     if not isinstance(payload,(dict,list)):return
                     summary.json_candidates+=1;summary.phase_json_candidates[phase[0]]=summary.phase_json_candidates.get(phase[0],0)+1; clean,query=safe_url(request.url)
-                    observations.append(_Observation(request.url,request.method,self._body(request),query,payload,phase[0],request_content_type=request.headers.get("content-type")))
+                    activity_clock.record_json(request.url)
+                    observation = _Observation(request.url,request.method,self._body(request),query,payload,phase[0],request_content_type=request.headers.get("content-type"))
+                    observations.append(observation)
+                    # Strong boot-recovery evidence is deliberately structural:
+                    # reuse the normal generic list scorer/reliability gate,
+                    # rather than treating a job-like URL (or its hostname) as
+                    # proof that a real list request has occurred.
+                    if self._reliable_list_source(self._candidate(observation)):
+                        activity_clock.record_reliable_list()
                 page.on("response",observe)
                 try:
                     page.goto(url,wait_until="domcontentloaded",timeout=self.timeout_ms)
+                    domcontentloaded=True
                 except PlaywrightTimeoutError:
                     warnings.append("NAVIGATION_TIMEOUT_CONTINUING")
                 phase[0]="TERMINAL_HYDRATION" if terminal_mode else "HYDRATION";hydration=wait_for_hydration(page,lambda:len(observations))
                 if not hydration["stabilized"]:warnings.append("HYDRATION_TIMEOUT")
-                if not observations and not _expired():
-                    wait_for_readiness_consensus(page,lambda:len(observations),timeout_ms=min(self.timeout_ms,15000))
-                # Give delayed public XHR sources one bounded stabilization window.
-                if observations and not _expired():
-                    page.wait_for_timeout(500)
-                    wait_for_hydration(page,lambda:len(observations),timeout_ms=1500,interval_ms=250)
+                # Activity-aware observation window (STEP 53D): a handful of early
+                # portal-config JSONs reaching a stable DOM does NOT mean the page
+                # is done loading.  Keep observing until network activity has been
+                # quiet, the DOM is stable, and no job-semantic request is pending —
+                # bounded by a hard maximum deadline.  A HIGH-confidence source
+                # found early still exits quickly instead of idling.
+                if not _expired():
+                    observation_policy=wait_for_activity_quiet(
+                        page,activity_clock,dom_snapshot,
+                        has_high_confidence_source=lambda:bool(next((c for c in self._rank(observations) if self._reliable_list_source(c)),None)))
+                    summary.observation_policy=observation_policy
+                    if observation_policy["reason"]=="MAX_OBSERVATION_DEADLINE":warnings.append("OBSERVATION_MAX_DEADLINE")
+                    if not observations:wait_for_readiness_consensus(page,lambda:len(observations),timeout_ms=min(self.timeout_ms,15000))
+                    elif not any("job-semantic" in str(getattr(x,"url","")) for x in observations) and not observation_policy["job_semantic_requests"]:
+                        # No job-semantic request has been seen yet: give a bounded
+                        # extra chance for slow SPA chains (generic, not site-tied).
+                        wait_for_readiness_consensus(page,lambda:len(observations),timeout_ms=3000)
+                # STEP 53E: a quiet SPA that had activity but never triggered a
+                # job request may be stuck during boot.  This is intentionally
+                # evaluated before state/source ranking and is bounded to one
+                # generic reload.  Reload attempts start with clean observation
+                # state so stale first-attempt candidates cannot affect ranking.
+                initial_attempt_rank=self._rank(observations)
+                initial_attempt_source=next((c for c in initial_attempt_rank if self._reliable_list_source(c)),None)
+                boot_text=page.locator("body").inner_text(timeout=3000)[:20000]
+                boot_snapshot=dom_snapshot()
+                boot_environment_failure=bool(re.search(r"(?i)(site can.t be reached|dns_probe|err_[a-z_]+|service unavailable|bad gateway)",boot_text))
+                boot_decision=classify_boot_state(
+                    domcontentloaded=domcontentloaded,
+                    elapsed_ms=observation_policy.get("elapsed_ms",0) if not _expired() else activity_clock.elapsed_ms(),
+                    activity_observed=activity_clock.activity_count,
+                    job_semantic_requests=activity_clock.job_semantic_count,
+                    reliable_list_responses=activity_clock.reliable_list_count,
+                    network_quiet_ms=activity_clock.quiet_ms(),
+                    dom_job_ready=boot_snapshot.get("job_card_count",0)>=2,
+                    source_found=bool(initial_attempt_source),
+                    auth_or_captcha=self._blocked(boot_text),
+                    environment_failure=boot_environment_failure,
+                )
+                boot_attempts.append({"attempt":1,"state":boot_decision.state,"reason":boot_decision.reason,**boot_decision.evidence,"source_found":bool(initial_attempt_source)})
+                if reload_allowed(boot_decision,boot_reload_count) and not _expired():
+                    boot_reload_count+=1;warnings.append("BOOT_STALL_RELOAD_ATTEMPTED")
+                    # Attempt isolation: listeners remain attached but write only
+                    # to the fresh state below after reload.
+                    observations.clear();inventory.clear();summary=NetworkSummary();activity_clock=ActivityClock();domcontentloaded=False
+                    phase[0]="BOOT_RECOVERY_RELOAD"
+                    try:
+                        page.reload(wait_until="domcontentloaded",timeout=self.timeout_ms)
+                        domcontentloaded=True
+                        phase[0]="BOOT_RECOVERY_HYDRATION"
+                        hydration=wait_for_hydration(page,lambda:len(observations))
+                        if not hydration["stabilized"]:warnings.append("BOOT_RECOVERY_HYDRATION_TIMEOUT")
+                        if not _expired():
+                            observation_policy=wait_for_activity_quiet(
+                                page,activity_clock,dom_snapshot,
+                                has_high_confidence_source=lambda:bool(next((c for c in self._rank(observations) if self._reliable_list_source(c)),None)))
+                            summary.observation_policy=observation_policy
+                    except Exception as exc:
+                        warnings.append("BOOT_STALL_RELOAD_FAILED")
+                        boot_attempts.append({"attempt":2,"state":"RELOAD_FAILED","reason":type(exc).__name__})
+                    else:
+                        retry_rank=self._rank(observations)
+                        retry_source=next((c for c in retry_rank if self._reliable_list_source(c)),None)
+                        retry_text=page.locator("body").inner_text(timeout=3000)[:20000]
+                        retry_snapshot=dom_snapshot()
+                        retry_decision=classify_boot_state(
+                            domcontentloaded=domcontentloaded,
+                            elapsed_ms=observation_policy.get("elapsed_ms",activity_clock.elapsed_ms()),
+                            activity_observed=activity_clock.activity_count,
+                            job_semantic_requests=activity_clock.job_semantic_count,
+                            reliable_list_responses=activity_clock.reliable_list_count,
+                            network_quiet_ms=activity_clock.quiet_ms(),
+                            dom_job_ready=retry_snapshot.get("job_card_count",0)>=2,
+                            source_found=bool(retry_source),
+                            auth_or_captcha=self._blocked(retry_text),
+                            environment_failure=bool(re.search(r"(?i)(site can.t be reached|dns_probe|err_[a-z_]+|service unavailable|bad gateway)",retry_text)),
+                        )
+                        boot_attempts.append({"attempt":2,"state":retry_decision.state,"reason":retry_decision.reason,**retry_decision.evidence,"source_found":bool(retry_source)})
+                        if retry_decision.state=="QUIET_BOOT_STALL":warnings.append("BOOT_STALL_UNRECOVERED")
+                        elif retry_source:warnings.append("BOOT_STALL_RECOVERED")
+                summary.boot_recovery={"reload_count":boot_reload_count,"attempts":boot_attempts,"max_reloads":1}
                 states=list(serialized_states(page)) if not _expired() else []
                 for state_index,state in enumerate(states):
                     observations.append(_Observation(url,"STATE",{}, {},state,"HYDRATION",False,state_index))
@@ -307,6 +395,23 @@ class GenericApiDetector:
                 if self._blocked(text):
                     return DiscoveryResult(source_url=url,status="BLOCKED",network_summary=summary,warnings=["HUMAN_VERIFICATION_OR_LOGIN_REQUIRED"],started_at=started,finished_at=datetime.now(),elapsed_seconds=perf_counter()-clock)
                 initial_rank=self._rank(observations);initial_probable=initial_rank[0] if initial_rank and initial_rank[0].score>=self.threshold else None
+                # A V1 input may already render its job entities from a
+                # plaintext browser store while its transport is encrypted,
+                # cached, or otherwise not a replayable JSON response.  This
+                # generic observation is deliberately gated by both visible
+                # recruitment semantics and the runtime scanner's structural
+                # HIGH-confidence id/title evidence; it is not an ATS or host
+                # specific fallback.
+                if not initial_probable and not _expired() and re.search(r"(?i)(job|position|career|招聘|职位|岗位)", text):
+                    try:
+                        from job_extractor.discovery.runtime_data import observe_runtime_job_source,detect_pagination_trigger
+                        observed_requests=[{**o.query,**o.body} for o in observations if o.method in ("GET","POST")]
+                        observed_runtime=observe_runtime_job_source(page,provider="UNKNOWN",observed_requests=observed_requests,trigger=detect_pagination_trigger(page))
+                        if observed_runtime.confidence=="HIGH" and observed_runtime.records:
+                            runtime_source=observed_runtime
+                            inventory.append(CandidateSource(source_type="RUNTIME_STATE",url=url,status="CANDIDATE",score=15,confidence="HIGH",evidence=observed_runtime.evidence,metadata={"mechanism":observed_runtime.mechanism,"record_count":observed_runtime.record_count,"source_path":observed_runtime.source_path}))
+                    except Exception:
+                        pass
                 if not initial_probable and not _expired():
                     triggered=self._job_page_search_trigger(page)
                     if triggered:
@@ -409,6 +514,27 @@ class GenericApiDetector:
                         runtime_source=observe_runtime_job_source(page,provider="UNKNOWN",observed_requests=observed_requests,trigger=detect_pagination_trigger(page))
                     except Exception:
                         runtime_source=None
+                # STEP 54B: when a credible runtime source was identified but the
+                # list JD is incomplete, observe one organic detail request: the
+                # page itself issues it after navigating a sample job route. The
+                # contract is bound to observed runtime-state evidence only — no
+                # host, provider, or route-specific inference. Fail-closed: no
+                # observation means no contract and jobs stay honestly incomplete.
+                if runtime_source is not None and runtime_source.confidence=="HIGH" and runtime_source.records and not _expired():
+                    from job_extractor.discovery.runtime_data import observe_runtime_detail_contract
+                    needs_detail=any(
+                        not record.get(runtime_source.jd_fields[0]) if runtime_source.jd_fields else True
+                        for record in runtime_source.records
+                    ) if runtime_source.jd_fields else True
+                    sample_id=next((str(record.get(runtime_source.job_id_field)) for record in runtime_source.records
+                                    if runtime_source.job_id_field and record.get(runtime_source.job_id_field) not in (None,"")),None)
+                    if needs_detail and sample_id:
+                        try:
+                            detail_contract=observe_runtime_detail_contract(page,sample_job_id=sample_id)
+                        except Exception:
+                            detail_contract={}
+                        if detail_contract:
+                            runtime_source=runtime_source.model_copy(update={"detail_contract":detail_contract})
                 chosen_detail=detail_hint or (observed_links[0] if observed_links else None)
                 if chosen_detail and not _expired():
                     phase[0]="DETAIL"
@@ -477,7 +603,7 @@ class GenericApiDetector:
             bounded=(probable.observed_list_length or 0)>=20 and probable.detail_url_coverage==1.0 and probable.observed_unique_ids==min(probable.observed_list_length or 0,20)
             if bounded and not pagination_inputs and pagination_override is None:
                 probable.evidence.append("bounded unpaginated response has unique IDs and complete detail URL coverage")
-        status="DISCOVERED" if probable else ("PARTIAL" if lists or dom.get("status") in ("DOM_LIST_DETECTED","DOM_COMPLEX_DETECTED") else "NOT_FOUND")
+        status="DISCOVERED" if (probable or (runtime_source is not None and runtime_source.records)) else ("PARTIAL" if lists or dom.get("status") in ("DOM_LIST_DETECTED","DOM_COMPLEX_DETECTED") else "NOT_FOUND")
         if status=="NOT_FOUND":warnings.append("NO_DYNAMIC_JOB_SOURCE")
         fields={str(x).lower() for x in (probable.response_shape.get("sample_field_names",[]) if probable else [])}
         job_fields={"job_id","jobid","jobtitle","positionid","positionname","requisitionid","department","location","locations","requirements","responsibilities","applyurl","detailurl"}

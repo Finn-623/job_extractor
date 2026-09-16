@@ -17,6 +17,11 @@ class CollectionMetrics(BaseModel):
     details_attempted: int = 0
     details_succeeded: int = 0
     details_failed: int = 0
+    # STEP 54B: pre-fetch required count from the detail stage gate
+    # (needs_detail_fetch per job before any request) so reporting can
+    # reconcile attempted against required at the SAME point in time.
+    # Post-merge state counts drift when detail payloads upgrade jobs.
+    details_required: int = 0
     elapsed_seconds: float = 0.0
     page_size: int | None = None
     jd_strategy: Literal["LIST_SUFFICIENT", "DETAIL_REQUIRED", "DETAIL_FALLBACK", "MIXED", "UNKNOWN"] = "UNKNOWN"

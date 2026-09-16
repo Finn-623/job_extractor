@@ -1,17 +1,24 @@
 from __future__ import annotations
 from collections import Counter
 from typing import Any
-from job_extractor.discovery.network_analyzer import TOTAL_TIER1,TOTAL_TIER2,find_array_info,find_field,response_shape
+from job_extractor.discovery.network_analyzer import TOTAL_TIER1,TOTAL_TIER2,find_array_info,find_field,find_total_field,response_shape
 
-TITLE={"title","jobtitle","job_title","jobname","positionname","position_name","projectpositionname","name"}
-IDS={"id","jobid","job_id","jobcode","postid","post_id","postingid","posting_id","positionid","position_id","positioncode","requisitionid","requisition_id"}
-LOCATION={"location","locations","city","cityname","city_name","country","workplacecode"}
-CATEGORY={"department","team","category","jobcategory","job_category","function","recruitcategoryname"}
+TITLE={"title","jobtitle","job_title","jobname","positionname","position_name","projectpositionname","positiontitle","postname","postingname","jobadname","recruitname","name"}
+IDS={"id","jobid","job_id","jobcode","jobadid","job_ad_id","postid","post_id","postingid","posting_id","positionid","position_id","positioncode","recruitid","recruit_id","requisitionid","requisition_id"}
+LOCATION={"location","locations","city","cityname","city_name","country","workplacecode","workplacestr","worklocation"}
+CATEGORY={"department","departmentname","team","category","jobcategory","job_category","function","recruitcategoryname","posttypename","posttype"}
 LINK={"url","absolute_url","job_url","joburl","detail_url","detailurl","apply_url","applyurl","path","slug"}
 JD={"description","overview","responsibility","responsibilities","requirement","requirements","qualification","qualifications","jobdescription","job_description"}
 REFERENCE={"code","key","value","label","dictcode","dict_code","optioncode","option_code","enum","enumcode","enum_code","categorycode","category_code","parentcode","parent_code","parentid","parent_id","children","childlist","displayorder","display_order","sortorder","sort_order","level"}
 
-def _fields(item:Any)->set[str]:return {str(k).lower() for k in item} if isinstance(item,dict) else set()
+def _fields(item:Any,depth:int=0)->set[str]:
+    """Bounded field semantics for record wrappers such as ``baseInfo``/``job``."""
+    if not isinstance(item,dict):return set()
+    found={str(k).lower() for k in item}
+    if depth>=3:return found
+    for value in item.values():
+        if isinstance(value,dict):found.update(_fields(value,depth+1))
+    return found
 def _job_prefixed(keys:set[str])->bool:
     return any(("job" in k or "position" in k or "requisition" in k or "posting" in k or k.endswith("postcode") or k=="postcode") for k in keys)
 def _array_metrics(items:list[Any])->tuple[float,float,set[str]]:
@@ -58,8 +65,8 @@ def score_list(url:str,payload:Any)->tuple[int,list[str],dict[str,Any]]:
     homogeneity,density,fields=_array_metrics(items);shape=response_shape(payload)
     records=[x.get("node") if isinstance(x,dict) and isinstance(x.get("node"),dict) else x for x in items]
     shape.update({"candidate_list_path":path,"array_length":length,"sample_field_names":sorted({str(k) for x in records if isinstance(x,dict) for k in x})[:100],"sampled_items":len(items)})
-    shape["inferred_job_id_field"] = next((key for key in ("id","jobId","positionId","requisitionId") if key.lower() in fields),None)
-    shape["inferred_job_title_field"] = next((key for key in ("title","jobTitle","positionName","projectPositionName") if key.lower() in fields),None)
+    shape["inferred_job_id_field"] = next((key for key in ("id","jobId","jobAdId","positionId","postId","recruitId","requisitionId") if key.lower() in fields),None)
+    shape["inferred_job_title_field"] = next((key for key in ("title","jobTitle","jobAdName","positionName","positionTitle","postName","recruitName","projectPositionName") if key.lower() in fields),None)
     reasons=_negative_reasons(url,payload,homogeneity,density,fields)
     if "job" in low:score+=2;evidence.append("URL contains job/jobs")
     if "position" in low:score+=2;evidence.append("URL contains position")
@@ -76,7 +83,7 @@ def score_list(url:str,payload:Any)->tuple[int,list[str],dict[str,Any]]:
     if density>=0.8:score+=4;evidence.append(f"high job entity density: {density:.2f}")
     observed=length
     if observed>=5:score+=3;evidence.append(f"response contains {observed} records")
-    total=find_field(payload,TOTAL_TIER1) or find_field(payload,TOTAL_TIER2)
+    total=find_total_field(payload,length)
     if total:score+=2;evidence.append(f"response has total field: {total}")
     if not items and isinstance(payload,dict):score-=3;evidence.append("no list-shaped response")
     if reasons:score=min(score,9);evidence.extend(f"rejected: {x}" for x in reasons)
@@ -104,6 +111,6 @@ def reliable_list_candidate(candidate:Any)->bool:
     """Whether an already-scored candidate is strong enough for navigation early-stop."""
     if not candidate or candidate.confidence!="HIGH" or candidate.rejection_reasons or candidate.job_entity_density<0.8:return False
     fields={str(x).lower() for x in candidate.response_shape.get("sample_field_names",[])}
-    has_id=bool(fields&{x.lower() for x in ("id","jobId","job_id","jobPostId","positionId","requisitionId","postingId")})
-    has_title=bool(fields&{x.lower() for x in ("title","name","jobTitle","job_name","positionName","projectPositionName")})
+    has_id=bool(fields&{x.lower() for x in ("id","jobId","job_id","jobAdId","jobPostId","positionId","postId","recruitId","requisitionId","postingId")})
+    has_title=bool(fields&{x.lower() for x in ("title","name","jobTitle","jobAdName","job_name","positionName","positionTitle","postName","recruitName","projectPositionName")})
     return has_id and has_title
