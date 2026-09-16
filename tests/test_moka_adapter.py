@@ -31,6 +31,16 @@ def test_scope_from_url_and_initialization():
     s=MokaAdapter.parse_scope(URL,HTML); assert (s.org_id,s.site_id,s.site,s.company)==("acme",123,"campus","Acme")
 def test_social_scope():
     s=MokaAdapter.parse_scope(URL.replace("campus","social"),HTML); assert s.site=="social"
+
+@pytest.mark.parametrize("prefix", ["campus-recruitment", "campus_apply"])
+def test_campus_path_variants_parse_to_same_scope(prefix):
+    s=MokaAdapter.parse_scope(f"https://app.mokahr.com/{prefix}/acme/123",HTML)
+    assert (s.org_id,s.site_id,s.site,s.company)==("acme",123,"campus","Acme")
+
+def test_malformed_campus_apply_fails_closed():
+    with pytest.raises(MokaResponseError): MokaAdapter.parse_scope("https://app.mokahr.com/campus_apply/acme/x",HTML)
+    with pytest.raises(MokaResponseError): MokaAdapter.parse_scope("https://app.mokahr.com/campus_apply/acme/999",HTML)
+    with pytest.raises(MokaResponseError): MokaAdapter.parse_scope("https://app.mokahr.com/campus_apply/acme",HTML)
 def test_bad_scope_url():
     with pytest.raises(MokaResponseError): MokaAdapter.parse_scope("https://app.mokahr.com/jobs",HTML)
 def test_bad_site_id():

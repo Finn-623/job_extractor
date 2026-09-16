@@ -36,7 +36,7 @@ class MokaAdapter(BaseAdapter):
     @classmethod
     def parse_scope(cls,url,text):
         p=[x for x in urlparse(url).path.split("/") if x]
-        if len(p)<3 or p[0] not in {"campus-recruitment","social-recruitment"}: raise MokaResponseError("unsupported Moka recruitment URL scope")
+        if len(p)<3 or p[0] not in {"campus-recruitment","social-recruitment","campus_apply"}: raise MokaResponseError("unsupported Moka recruitment URL scope")
         try: sid=int(p[2])
         except ValueError as e: raise MokaResponseError("invalid Moka site id") from e
         text=html.unescape(text)
