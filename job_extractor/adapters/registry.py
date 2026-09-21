@@ -30,6 +30,13 @@ class AdapterRegistry:
 
     def detect(self, url: str) -> type[BaseAdapter]:
         from job_extractor.adapters.generic import GenericAdapter
+        from job_extractor.adapters.beisen_cms import BeisenCMSCollector
+        from job_extractor.adapters.zhiye import ZhiyeAdapter
+        # CmsPortal and legacy Zhiye share a hostname pattern.  Only an
+        # entrance-page fingerprint is authoritative; a failed probe preserves
+        # the established legacy route.
+        if ZhiyeAdapter.match(url) and BeisenCMSCollector.probe(url):
+            return BeisenCMSCollector
         for adapter in self.get_registered_adapters():
             if adapter.match(url):
                 return adapter

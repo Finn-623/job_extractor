@@ -21,6 +21,7 @@ def test_signed_public_candidate_uses_browser_observed_pagination_without_persis
     result=DiscoveryResult(source_url="https://jobs.test/campus/",status="DISCOVERED",candidate_list_apis=[c],probable_list_api=c,detected_pagination=PaginationDetection(pagination_type="OFFSET",page_param="offset",page_size_param="limit",total_field="data.count"))
     plan=CollectionPlanBuilder().build(result);validation=CollectionPlanValidator().validate(plan)
     assert plan.mode=="BROWSER_API" and plan.browser_trigger=="AUTO_PAGINATION" and validation.valid
+    assert plan.observed_total==764
     assert "_signature" not in plan.query_values and "[REDACTED]" not in plan.model_dump_json()
 
 

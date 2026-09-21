@@ -38,7 +38,13 @@ class CollectionPlanValidator:
             elif not source.get("job_id_field") or not source.get("job_title_field"):errors.append("RUNTIME_SOURCE_FIELDS_MISSING")
             elif plan.executable:
                 total=source.get("total");count=int(source.get("record_count") or 0)
-                if isinstance(total,int) and total>count:
+                # STEP72: a batch-pagination contract is only mandatory when
+                # the runtime source itself claims a validated batch contract.
+                # A partial unvalidated snapshot (total > record_count, no
+                # observed offset/limit) may execute snapshot-only; the
+                # collector reconciles against total and reports INCOMPLETE.
+                claims_batches=bool(source.get("pagination_validated")) or source.get("pagination_model")=="OFFSET"
+                if isinstance(total,int) and total>count and claims_batches:
                     if source.get("pagination_model")!="OFFSET":errors.append("RUNTIME_PAGINATION_MODEL_MISSING")
                     if not source.get("total"):errors.append("RUNTIME_TOTAL_MISSING")
                     if not source.get("limit"):errors.append("RUNTIME_LIMIT_MISSING")
@@ -48,7 +54,7 @@ class CollectionPlanValidator:
             paginated=source.get("pagination_model") in ("OFFSET","PAGE") or bool(source.get("pagination"))
             if paginated and not (isinstance(source.get("total"),int) and source.get("total")>0) and not (source.get("terminal_page_signal") or source.get("has_more_field")):
                 errors.append("RUNTIME_TERMINATION_STRATEGY_MISSING")
-        elif plan.mode=="DOM":
+        elif plan.mode in ("DOM","HTML"):
             if not plan.allowed_detail_urls:errors.append("DOM_LINKS_MISSING")
             source_host=urlsplit(plan.source_url).hostname
             trusted=set(plan.trusted_detail_hosts)

@@ -134,19 +134,34 @@ def evaluate_data_completeness(result: CollectionResult) -> DataCompleteness:
         for j in result.jobs)
     source_incomplete=jd_incomplete
     metrics=getattr(result,"metrics",None)
+    attempted=getattr(metrics,"details_attempted",0) if metrics else 0
+    succeeded=getattr(metrics,"details_succeeded",0) if metrics else 0
+    failed=getattr(metrics,"details_failed",0) if metrics else 0
+    # STEP96: "no detail fetch was performed" (LIST_SUFFICIENT) is not "JD
+    # pending". When nothing was attempted the whole detail-activity view
+    # stays zero; JD completeness is carried by jd_total/jd_complete.
+    if not (attempted or succeeded or failed):
+        detail_required=detail_attempted=detail_succeeded=detail_failed=detail_pending=0
+    else:
+        # STEP 54B: required = pre-fetch gate count from the detail stage when
+        # available; post-merge state counts drift downward as detail payloads
+        # upgrade job records (the 7-vs-182 semantics drift).
+        detail_required=getattr(metrics,"details_required",0) if metrics else sum(isinstance(j.raw_data,dict) and j.raw_data.get("_jd_state") in ("SUMMARY","ABSENT") for j in result.jobs)
+        detail_attempted=attempted
+        detail_succeeded=succeeded
+        detail_failed=failed
+        detail_pending=getattr(metrics,"detail_pending",0) if metrics else 0
     return DataCompleteness(total_jobs=total,complete_jobs=total-missing_jd,
         missing_jd_jobs=missing_jd,missing_requirements_jobs=missing_req,
         missing_responsibilities_jobs=missing_resp,source_incomplete_jobs=source_incomplete,
         completeness_ratio=round((total-missing_jd)/total,6) if total else 1.0,
-        jd_complete=jd_complete,jd_incomplete=jd_incomplete,
+        jd_total=total,jd_complete=jd_complete,jd_incomplete=jd_incomplete,jd_missing=jd_incomplete,
         list_sufficient=sum(isinstance(j.raw_data,dict) and j.raw_data.get("_jd_state") in ("FULL_TEXT","SPLIT") for j in result.jobs),
-        # STEP 54B: required = pre-fetch gate count from the detail stage when
-        # available; post-merge state counts drift downward as detail payloads
-        # upgrade job records (the 7-vs-182 semantics drift).
-        detail_required=getattr(metrics,"details_required",0) if metrics else sum(isinstance(j.raw_data,dict) and j.raw_data.get("_jd_state") in ("SUMMARY","ABSENT") for j in result.jobs),
-        detail_attempted=getattr(metrics,"details_attempted",0) if metrics else 0,
-        detail_succeeded=getattr(metrics,"details_succeeded",0) if metrics else 0,
-        detail_failed=getattr(metrics,"details_failed",0) if metrics else 0,
+        detail_required=detail_required,
+        detail_attempted=detail_attempted,
+        detail_succeeded=detail_succeeded,
+        detail_failed=detail_failed,
+        detail_pending=detail_pending,
         source_requirements_absent=source_requirements_absent)
 
 def finalize_result(result: CollectionResult, adapter: BaseAdapter) -> CollectionResult:

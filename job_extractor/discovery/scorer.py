@@ -2,6 +2,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 from job_extractor.discovery.network_analyzer import TOTAL_TIER1,TOTAL_TIER2,find_array_info,find_field,find_total_field,response_shape
+from job_extractor.field_semantics import infer_field
 
 TITLE={"title","jobtitle","job_title","jobname","positionname","position_name","projectpositionname","positiontitle","postname","postingname","jobadname","recruitname","name"}
 IDS={"id","jobid","job_id","jobcode","jobadid","job_ad_id","postid","post_id","postingid","posting_id","positionid","position_id","positioncode","recruitid","recruit_id","requisitionid","requisition_id"}
@@ -10,6 +11,23 @@ CATEGORY={"department","departmentname","team","category","jobcategory","job_cat
 LINK={"url","absolute_url","job_url","joburl","detail_url","detailurl","apply_url","applyurl","path","slug"}
 JD={"description","overview","responsibility","responsibilities","requirement","requirements","qualification","qualifications","jobdescription","job_description"}
 REFERENCE={"code","key","value","label","dictcode","dict_code","optioncode","option_code","enum","enumcode","enum_code","categorycode","category_code","parentcode","parent_code","parentid","parent_id","children","childlist","displayorder","display_order","sortorder","sort_order","level"}
+
+
+def _role_fields(keys:set[str])->tuple[set[str],set[str]]:
+    """Conservative role recognition for enterprise job-record variants.
+
+    Only explicit job-role suffixes qualify: arbitrary ``name``, ``id`` and
+    ``code`` fields remain insufficient to promote config/material payloads.
+    """
+    ids=keys & IDS
+    titles=keys & TITLE
+    ids.update(key for key in keys if key.endswith(("jobid","positionid","postid","postingid","requisitionid")))
+    titles.update(key for key in keys if key.endswith(("jobname","positionname","postname","postingname")))
+    # A demand code is a secondary requisition identity only when a distinct,
+    # explicit job title role is also present.
+    if titles:
+        ids.update(key for key in keys if key.endswith("demandcode"))
+    return ids,titles
 
 def _fields(item:Any,depth:int=0)->set[str]:
     """Bounded field semantics for record wrappers such as ``baseInfo``/``job``."""
@@ -27,7 +45,7 @@ def _array_metrics(items:list[Any])->tuple[float,float,set[str]]:
     if not records:return 0.0,0.0,set()
     key_sets=[_fields(x) for x in records];modal=set(Counter(tuple(sorted(x)) for x in key_sets).most_common(1)[0][0])
     homogeneity=sum(len(keys&modal)/max(1,len(keys|modal)) for keys in key_sets)/len(key_sets)
-    density=sum(bool(keys&TITLE and keys&IDS and (keys&(LOCATION|CATEGORY|LINK|JD) or _job_prefixed(keys))) for keys in key_sets)/len(key_sets)
+    density=sum(bool((lambda roles: roles[0] and roles[1] and (keys&(LOCATION|CATEGORY|LINK|JD) or _job_prefixed(keys)))(_role_fields(keys))) for keys in key_sets)/len(key_sets)
     return round(homogeneity,4),round(density,4),set().union(*key_sets)
 
 def _negative_reasons(url:str,payload:Any,homogeneity:float,density:float,fields:set[str])->list[str]:
@@ -42,7 +60,9 @@ def _negative_reasons(url:str,payload:Any,homogeneity:float,density:float,fields
     job_meta=fields&{"department","department_id","deptid","team","location","locations","city","cityname","city_info","worklocation","requirement","requirements","responsibility","responsibilities","jobdescription","description","recruittype","employment","job_function","job_category"}
     content_semantic=fields&{"content","contentshort","summary","subtitle","urlshort","categoryfullname","categorycode","categoryname","contenttype","story","banner","cooperation"}
     if content_semantic and not job_prefixed and not job_meta:reasons.append("CONTENT_LIST")
-    if any(x in low for x in ("/cooperation","cooperationinfo","/banner","/story","/news","/article")):reasons.append("NON_JOB_SEMANTIC_SOURCE")
+    program_semantic=fields&{"targetaudience","buttons","sortorder","programtype","programstatus"}
+    if program_semantic and not job_prefixed and not (fields&{"positionname","jobname","postname","jobtitle"}):reasons.append("PROGRAM_PAYLOAD")
+    if any(x in low for x in ("/cooperation","cooperationinfo","/banner","/material","/story","/news","/article")):reasons.append("NON_JOB_SEMANTIC_SOURCE")
     dict_semantic=fields&{"pcpath","mobilepath","seasontype","displayorder","orderval","hotval","parentid"}
     region_semantic=fields&{"regioncode","regionname","provincename","provinceid","citycode","cityid","hotcity"}
     if not job_prefixed and not (fields&{"requirement","jobdescription","positionname","jobname","title"}):
@@ -60,24 +80,26 @@ def score_list(url:str,payload:Any)->tuple[int,list[str],dict[str,Any]]:
     arrays=find_array_info(payload,max_depth=7)
     def rank_array(entry):
         path,length,items=entry;homogeneity,density,fields=_array_metrics(items)
-        return density, bool(fields&TITLE and fields&IDS), homogeneity, min(length,100)
+        ids,titles=_role_fields(fields)
+        return density, bool(ids and titles), homogeneity, min(length,100)
     path,length,items=max(arrays,key=rank_array,default=(None,0,[]))
     homogeneity,density,fields=_array_metrics(items);shape=response_shape(payload)
     records=[x.get("node") if isinstance(x,dict) and isinstance(x.get("node"),dict) else x for x in items]
     shape.update({"candidate_list_path":path,"array_length":length,"sample_field_names":sorted({str(k) for x in records if isinstance(x,dict) for k in x})[:100],"sampled_items":len(items)})
-    shape["inferred_job_id_field"] = next((key for key in ("id","jobId","jobAdId","positionId","postId","recruitId","requisitionId") if key.lower() in fields),None)
-    shape["inferred_job_title_field"] = next((key for key in ("title","jobTitle","jobAdName","positionName","positionTitle","postName","recruitName","projectPositionName") if key.lower() in fields),None)
+    shape["inferred_job_id_field"] = infer_field(shape["sample_field_names"],"id")
+    shape["inferred_job_title_field"] = infer_field(shape["sample_field_names"],"title")
     reasons=_negative_reasons(url,payload,homogeneity,density,fields)
     if "job" in low:score+=2;evidence.append("URL contains job/jobs")
     if "position" in low:score+=2;evidence.append("URL contains position")
     if "search" in low or "list" in low:score+=1;evidence.append("URL contains search/list")
-    if fields&TITLE:score+=3;evidence.append("records contain a title field")
-    if fields&IDS:score+=3;evidence.append("records contain a stable id field")
+    id_fields,title_fields=_role_fields(fields)
+    if title_fields:score+=3;evidence.append("records contain a title field")
+    if id_fields:score+=3;evidence.append("records contain a stable id field")
     if fields&LOCATION:score+=2;evidence.append("records contain location/city")
     if fields&CATEGORY:score+=1;evidence.append("records contain department/category")
     if fields&LINK:score+=2;evidence.append("records contain detail/apply links")
     if fields&JD:score+=3;evidence.append("records contain JD fields")
-    if fields&(LOCATION|CATEGORY) and fields&TITLE and fields&IDS:
+    if fields&(LOCATION|CATEGORY) and title_fields and id_fields:
         score+=2;evidence.append("records combine stable ID, title, and job metadata")
     if homogeneity>=0.75:score+=2;evidence.append(f"homogeneous record structure: {homogeneity:.2f}")
     if density>=0.8:score+=4;evidence.append(f"high job entity density: {density:.2f}")
@@ -111,6 +133,5 @@ def reliable_list_candidate(candidate:Any)->bool:
     """Whether an already-scored candidate is strong enough for navigation early-stop."""
     if not candidate or candidate.confidence!="HIGH" or candidate.rejection_reasons or candidate.job_entity_density<0.8:return False
     fields={str(x).lower() for x in candidate.response_shape.get("sample_field_names",[])}
-    has_id=bool(fields&{x.lower() for x in ("id","jobId","job_id","jobAdId","jobPostId","positionId","postId","recruitId","requisitionId","postingId")})
-    has_title=bool(fields&{x.lower() for x in ("title","name","jobTitle","jobAdName","job_name","positionName","positionTitle","postName","recruitName","projectPositionName")})
+    has_id,has_title=_role_fields(fields)
     return has_id and has_title

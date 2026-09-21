@@ -61,7 +61,7 @@ def find_field(value: Any,names: set[str],max_depth: int=4,depth: int=0,prefix: 
         found=find_field(v,names,max_depth,depth+1,path)
         if found:return found
     return None
-TOTAL_TIER1={"total","totalcount","total_count","totalsize","totalelements","total_elements","recordstotal","records_total","datacount"}
+TOTAL_TIER1={"total","totalcount","total_count","totalsize","totalelements","total_elements","recordstotal","records_total","datacount","totalnum","total_num"}
 TOTAL_TIER2={"count"}
 
 def _integer(value: Any) -> int|None:

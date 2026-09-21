@@ -23,10 +23,29 @@ class CollectionMetrics(BaseModel):
     # Post-merge state counts drift when detail payloads upgrade jobs.
     details_required: int = 0
     elapsed_seconds: float = 0.0
+    # STEP96: wall-clock total vs pure collection time are different numbers.
+    total_elapsed_seconds: float = 0.0
+    collection_elapsed_seconds: float = 0.0
     page_size: int | None = None
     jd_strategy: Literal["LIST_SUFFICIENT", "DETAIL_REQUIRED", "DETAIL_FALLBACK", "MIXED", "UNKNOWN"] = "UNKNOWN"
     browser_pages_opened: int = 0
     browser_requests_observed: int = 0
+    # STEP 70: browser fallback runtime accounting (opt-in browser path only).
+    browser_jobs_attempted: int = 0
+    browser_jobs_resolved: int = 0
+    browser_jobs_blocked: int = 0
+    browser_jobs_budget_skipped: int = 0
+    browser_dom_resolved: int = 0
+    browser_network_resolved: int = 0
+    # STEP 70: unified detail accounting view. Invariant: detail_total ==
+    # detail_http_resolved + detail_browser_resolved + detail_blocked +
+    # detail_failed + detail_pending (each record classified exactly once).
+    detail_total: int = 0
+    detail_http_resolved: int = 0
+    detail_browser_resolved: int = 0
+    detail_blocked: int = 0
+    detail_failed: int = 0
+    detail_pending: int = 0
     initial_load_seconds: float = 0.0
     list_pagination_seconds: float = 0.0
     detail_fallback_seconds: float = 0.0
@@ -58,11 +77,16 @@ class DataCompleteness(BaseModel):
     # STEP 51 JD/detail diagnostics.
     jd_complete: int = 0
     jd_incomplete: int = 0
+    # STEP96: explicit JD-completeness view (jd_total/jd_missing) plus the
+    # detail-fetch-activity view; LIST_SUFFICIENT runs keep activity all-zero.
+    jd_total: int = 0
+    jd_missing: int = 0
     list_sufficient: int = 0
     detail_required: int = 0
     detail_attempted: int = 0
     detail_succeeded: int = 0
     detail_failed: int = 0
+    detail_pending: int = 0
     source_requirements_absent: int = 0
 
 class Job(BaseModel):

@@ -11,6 +11,36 @@ ENTRY_TERMS={
 }
 NEGATIVE_TERMS=("news","article","brand","privacy","login","event","marketing","tracking","analytics","socialresponsibility","社会责任","新闻","文章","活动")
 
+
+def trigger_job_page_search(page, node_selector: str = 'a,button,[role="button"],[role="menuitem"],[data-route],li') -> list[str]:
+    """Activate one visible, job-semantic control without portal-specific rules."""
+    script="""()=>Array.from(document.querySelectorAll('a,button,[role="button"],[role="menuitem"],[data-route],li')).map((n,i)=>({i,text:(n.innerText||n.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' '),href:(n.getAttribute&&(n.getAttribute('href')||n.getAttribute('data-route')))||'',active:n.getAttribute('aria-current')==='page'||/(^|\\s)is-active(\\s|$)|(^|\\s)active(\\s|$)/.test(n.className||'')}))"""
+    try:
+        nodes=page.evaluate(script)
+    except Exception:
+        return []
+    if not isinstance(nodes,list):
+        return []
+    positive=("全部职位","职位列表","在招职位","查看职位","搜索职位","职位搜索","校园招聘","社会招聘","招聘职位","职位机会","岗位投递","立即投递","投递职位","campus jobs","campus recruitment","campus","all jobs","view jobs","search jobs","职位")
+    negative=("登录","注册","隐私","筛选","filter","下一页","上一页","客服","投递","首页")
+    ranked=[]
+    for node in nodes:
+        if not isinstance(node,dict) or node.get("active"):
+            continue
+        text=str(node.get("text") or "").strip();value=(text+" "+str(node.get("href") or "")).lower()
+        if not text or len(text)>40 or (not any(term in text for term in ("立即投递","岗位投递","投递职位")) and any(x.lower() in value for x in negative)):
+            continue
+        score=sum(4 for term in positive if term.lower() in value)
+        if score>0:ranked.append((score,node))
+    ranked.sort(key=lambda item:-item[0]);clicked=[]
+    for _score,node in ranked[:1]:
+        try:
+            page.locator(node_selector).nth(int(node["i"])).click(timeout=3000)
+            page.wait_for_timeout(2000);clicked.append(str(node.get("text"))[:40])
+        except Exception:
+            pass
+    return clicked
+
 def rank_spa_action(text:str,target:str|None="",scope:str="UNKNOWN")->int:
     value=f"{text} {target or ''}".lower()
     positive=("全部职位","招聘职位","职位列表","查看职位","在招职位","岗位","职位","jobs","careers","recruitment","campus","social","intern")

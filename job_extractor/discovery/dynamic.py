@@ -129,16 +129,126 @@ def serialized_states(page) -> list[Any]:
     return values
 
 
+import re
+
+_WINDOW_STATE_VARS = frozenset({"__INITIAL_DATA__", "__INITIAL_STATE__", "__INITIAL_PROPS__", "__NUXT__"})
+_EMBEDDED_SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)
+
+
+def _balanced_json(text: str, start: int) -> str | None:
+    """Quote-aware balanced {...} span starting at ``start`` (STEP73)."""
+    open_ch = text[start]
+    close_ch = "}" if open_ch == "{" else "]"
+    depth = 0
+    quote = None
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == open_ch:
+            depth += 1
+        elif char == close_ch:
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
+def window_state_blobs(html: str) -> list[Any]:
+    """Raw-HTML embedded state blobs assigned to window globals (STEP73).
+
+    Only JSON-parseable values of well-known SSR variables are returned. JS
+    object literals that are not valid JSON (unquoted keys, Nuxt 2 IIFE
+    wrappers such as ``window.__NUXT__``) fail to parse and are silently
+    skipped — no evaluation, no guessing. The opening brace must appear near
+    the assignment so unrelated later objects are never misattributed.
+    """
+    values: list[Any] = []
+    if not html:
+        return values
+    for match in re.finditer(r"window\.(\w+)\s*=\s*", html):
+        if match.group(1) not in _WINDOW_STATE_VARS:
+            continue
+        start = match.end()
+        limit = min(len(html), start + 4096)
+        while start < limit and html[start] not in "{[":
+            start += 1
+        if start >= limit or html[start] != "{":
+            continue
+        blob = _balanced_json(html, start)
+        if not blob:
+            continue
+        try:
+            values.append(json.loads(blob))
+        except Exception:
+            pass
+    return values
+
+
+def embedded_states_from_html(html: str) -> list[Any]:
+    """Full embedded-state sequence for raw markup (STEP73).
+
+    script[type=application/json] states in document order (the raw-HTML
+    equivalent of ``serialized_states``) followed by window-global blobs.
+    Index alignment with discovery matters: SERIALIZED_STATE plans address
+    states by ``source_index``.
+    """
+    values: list[Any] = []
+    if not html:
+        return values
+    for match in _EMBEDDED_SCRIPT_RE.finditer(html):
+        attrs = (match.group(1) or "").lower()
+        body = match.group(2) or ""
+        if not (2 <= len(body) <= 10_000_000):
+            continue
+        if not ("application/json" in attrs or "__next_data__" in attrs):
+            continue
+        try:
+            values.append(json.loads(body.strip()))
+        except Exception:
+            pass
+    values.extend(window_state_blobs(html))
+    return values
+
+
 def wait_for_hydration(page, candidate_count, timeout_ms: int = 5000, interval_ms: int = 250) -> dict[str, Any]:
+    """Wait for a usable document, never for the window ``load`` event.
+
+    A mounted SPA may remain ``interactive`` while an image or font request
+    never settles.  Conversely, an empty root that merely stops changing is
+    still only a shell.  Start discovery once an interactive/complete document
+    has a concrete mount or meaningful rendered/source evidence.
+    """
     stable = 0; previous = None; elapsed = 0
     while elapsed < timeout_ms:
         try:
-            state = (page.locator('a[href]').count(), len(page.locator("body").inner_text()))
+            signal=page.evaluate("""() => {
+                const root=document.querySelector('#app,#root,main,[role="main"]');
+                const text=(document.body?.innerText || '').trim();
+                return {readyState:document.readyState,rootChildren:root?.childElementCount || 0,textLength:text.length};
+            }""") or {}
+            links=page.locator('a[href]').count()
+            state=(signal.get("readyState"),signal.get("rootChildren",0),links,signal.get("textLength",0))
         except Exception:
-            state = None
+            # Keep compatibility with lightweight test/browser doubles while
+            # retaining the old useful-content guard.
+            try:state=("complete",0,page.locator('a[href]').count(),len(page.locator("body").inner_text()))
+            except Exception:state=None
         snapshot = (state, candidate_count())
         stable = stable + 1 if snapshot == previous else 0; previous = snapshot
-        if stable >= 2:
+        ready=bool(state and state[0] in ("interactive","complete"))
+        mounted=bool(state and state[1]>0)
+        meaningful=bool(state and (state[2]>0 or state[3]>=80 or snapshot[1]>0))
+        if ready and (mounted or meaningful):
             return {"stabilized": True, "elapsed_ms": elapsed, "state": state}
         page.wait_for_timeout(interval_ms); elapsed += interval_ms
     return {"stabilized": False, "elapsed_ms": elapsed, "state": previous[0] if previous else None}

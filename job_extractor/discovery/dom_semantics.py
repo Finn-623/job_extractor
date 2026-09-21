@@ -209,6 +209,18 @@ def extract_detail_dom(page)->dict[str,Any]:
     return {"title":title,"title_selector":title_selector,"location":location,"location_selector":location_selector,
         "department":department,"department_selector":department_selector,"employment_type":employment,
         "employment_type_selector":employment_selector,"work_mode":work_mode,"jd":jd,"jd_selector":jd_selector}
+# STEP96: whole-title company fallback. Structural strips only (leading join
+# verbs, trailing recruitment words) — no hostname or site vocabulary.
+_TITLE_COMPANY_NOISE=re.compile(r"(?i)(?:招聘|jobs|careers|position|opening|hiring|岗位|职位|官网)")
+def _company_from_title(title:str|None)->str|None:
+    value=(title or "").strip()
+    if not value or re.search(r"\s+[|–—-]\s+",value):return None  # separator titles belong to the structured path
+    value=re.sub(r"^(?:加入|join|jobs?\s+at|careers\s+at|work\s+at|welcome\s+to)\s*","",value,flags=re.I)
+    value=re.sub(r"(?:\s*(?:校园招聘|社会招聘|春季招聘|秋季招聘|夏季招聘|招聘))+$","",value)
+    value=value.strip(" -|–—·")
+    if not value or len(value)>30 or _TITLE_COMPANY_NOISE.search(value):return None
+    return company_name_or_none(value)
+
 def extract_company(page)->str|None:
     # Structured metadata has priority over presentation metadata.
     try:
@@ -237,5 +249,9 @@ def extract_company(page)->str|None:
             for value in (parts[-1],parts[0]):
                 company=company_name_or_none(re.sub(r"(?i)\s+(?:jobs|careers)$","",value.strip()))
                 if company:return company
+    except Exception:pass
+    try:  # STEP96: plain titles like "加入思格新能源" / "Jobs at Sigenergy"
+        company=_company_from_title(page.title())
+        if company:return company
     except Exception:pass
     return None

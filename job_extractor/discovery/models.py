@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 class ApiCandidate(BaseModel):
     url: str
@@ -10,6 +10,9 @@ class ApiCandidate(BaseModel):
     confidence: Literal["LOW","MEDIUM","HIGH"]
     request_body_shape: dict[str,Any] = Field(default_factory=dict)
     query_params: dict[str,Any] = Field(default_factory=dict)
+    # Raw signed request context is execution-only.  PrivateAttr deliberately
+    # excludes it from model_dump(), JSON artifacts, repr, and diagnostics.
+    _runtime_query_params: dict[str,Any] = PrivateAttr(default_factory=dict)
     safe_request_values: dict[str,Any] = Field(default_factory=dict)
     request_content_type: str|None = None
     response_shape: dict[str,Any] = Field(default_factory=dict)
@@ -362,7 +365,7 @@ class NetworkSummary(BaseModel):
 
 class DiscoveryResult(BaseModel):
     source_url: str
-    status: Literal["DISCOVERED","PARTIAL","NOT_FOUND","BLOCKED"]
+    status: Literal["DISCOVERED","PARTIAL","NOT_FOUND","BLOCKED","UNSUPPORTED","PROTECTED_SOURCE","TIMEOUT","FAILED"]
     candidate_list_apis: list[ApiCandidate] = Field(default_factory=list)
     candidate_detail_apis: list[ApiCandidate] = Field(default_factory=list)
     probable_list_api: ApiCandidate|None = None

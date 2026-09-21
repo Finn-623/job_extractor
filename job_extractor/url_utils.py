@@ -1,8 +1,12 @@
+import re
 from urllib.parse import urlparse, urlunparse
 
 
 def normalize_url(url: str) -> str:
     """Normalize an HTTP(S) URL without performing network access."""
+    markdown = re.fullmatch(r"\s*\[[^\]]*\]\((https?://[^\s)]+)\)\s*", url)
+    if markdown:
+        url = markdown.group(1)
     parsed = urlparse(url.strip())
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise ValueError("URL must start with http:// or https:// and include a host.")

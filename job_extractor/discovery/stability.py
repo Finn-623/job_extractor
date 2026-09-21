@@ -27,7 +27,7 @@ def stable_navigation(url:str, discover:Callable[[str],DiscoveryResult], registr
     outcomes=[];signatures=[]
     if initial_result is not None:
         outcome=deep_recruitment_navigation(initial_result,discover,registry,requested_scope=requested_scope,deadline_seconds=_remaining());outcomes.append(outcome);signatures.append(_signature(outcome))
-        if initial_result.status in ("BLOCKED","DISCOVERED"):
+        if initial_result.status in ("BLOCKED","DISCOVERED","UNSUPPORTED","PROTECTED_SOURCE","TIMEOUT","FAILED"):
             initial_result.discovery_stability=classify_stability(signatures);return outcome,initial_result.discovery_stability
     for _ in range(max_attempts if initial_result is None else max(0,3-len(outcomes))):
         if deadline_seconds is not None and perf_counter()-started>deadline_seconds:

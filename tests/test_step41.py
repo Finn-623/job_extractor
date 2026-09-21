@@ -83,14 +83,16 @@ def test_encrypted_response_is_never_promoted_directly():
     assert source.record_count == 0 and source.confidence == "LOW" and source.executable is False
 
 
-def test_runtime_only_source_mode_builds_non_executable_plan():
+def test_runtime_partial_snapshot_builds_executable_plan():
     result = DiscoveryResult(source_url="https://careers.custom.test/jobs", status="PARTIAL", runtime_source=runtime_source(count=3, total=498))
     plan = CollectionPlanBuilder().build(result)
     assert plan.mode == "BROWSER_RUNTIME_DATA"
-    assert plan.review_required is True and plan.executable is False
-    assert "PAGINATION_REQUIRED" in plan.warnings
+    # STEP72: a HIGH-confidence confirmed runtime path is executable even as a
+    # partial snapshot; honest incompleteness is enforced by the collector
+    # (expected=runtime total, snapshot-only fetch => INCOMPLETE).
+    assert plan.executable is True and plan.review_required is False
     validation = CollectionPlanValidator().validate(plan)
-    assert validation.valid is False and "PLAN_NOT_EXECUTABLE" in validation.errors
+    assert validation.valid is True, validation.errors
 
 
 def test_runtime_source_complete_is_executable():

@@ -919,6 +919,7 @@ def resolve_encrypted_runtime_terminal(root, terminal_discover, registry, max_ca
     from job_extractor.discovery.provider_fingerprint import fingerprint_terminal
 
     started = perf_counter()
+    from job_extractor.discovery.budget import terminal_activation_budget
     preferred = ("SOCIAL", "CAMPUS", "INTERN", "ALL_JOBS", "OVERSEAS", "OTHER")
     entries = sorted(root.recruitment_entries, key=lambda entry: preferred.index(entry.entry_type) if entry.entry_type in preferred else len(preferred))
     intent = source_intent(root)
@@ -931,7 +932,13 @@ def resolve_encrypted_runtime_terminal(root, terminal_discover, registry, max_ca
         if not trusted:
             continue
         try:
-            discovery = terminal_discover(entry.url)
+            remaining = None if deadline_seconds is None else deadline_seconds - (perf_counter() - started)
+            if remaining is not None and remaining <= 0:
+                break
+            # Each probe receives an explicit bounded budget; detector phases
+            # consume that shared deadline rather than silently using their
+            # independent default budget.
+            discovery = terminal_discover(entry.url, budget=terminal_activation_budget(min(25.0, remaining) if remaining is not None else 25.0))
         except Exception:
             continue
         if discovery is None:

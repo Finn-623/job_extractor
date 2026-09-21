@@ -125,11 +125,15 @@ def test_runtime_pagination_validator_gating():
     assert CollectionPlanValidator().validate(plan_for(paginated)).valid is True
     incomplete = build_runtime_job_source(scan_of(15, 498), provider="moka", request_limit=30, request_offset=0, observed_requests=[{"offset": 0, "limit": 30}], trigger={"trigger_mode": "UNKNOWN"})
     plan = plan_for(incomplete)
-    assert plan.executable is False
+    # STEP72: partial unvalidated snapshots execute snapshot-only; the
+    # collector reconciles against the runtime total and reports INCOMPLETE.
+    assert plan.executable is True
     validation = CollectionPlanValidator().validate(plan)
-    assert validation.valid is False and "PLAN_NOT_EXECUTABLE" in validation.errors
-    executable_missing_contract = plan_for(incomplete).model_copy(update={"executable": True})
-    errors = CollectionPlanValidator().validate(executable_missing_contract).errors
+    assert validation.valid is True
+    # A plan claiming batch pagination (OFFSET model) without a validated
+    # trigger contract still fails closed.
+    claims_batches = plan.model_copy(update={"runtime_source": {**plan.runtime_source, "pagination_model": "OFFSET"}})
+    errors = CollectionPlanValidator().validate(claims_batches).errors
     assert "RUNTIME_PAGINATION_NOT_VALIDATED" in errors and "RUNTIME_TRIGGER_UNSAFE" in errors
 
 

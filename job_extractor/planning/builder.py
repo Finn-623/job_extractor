@@ -67,6 +67,23 @@ class CollectionPlanBuilder:
         # roles cover public variants such as postId/postName/jobAdName.
         jid=first(fields,IDS) or infer_field(fields,"id")
         title=first(fields,TITLES) or infer_field(fields,"title")
+        # STEP 67: nested-entity field resolution.  Discovery samples the
+        # list-item's TOP-LEVEL keys; when the job entity lives in a nested
+        # object (id/title/url discovered inside a sub-dict, signalled by a
+        # dotted detail-url field), qualify the response-shape's inferred leaf
+        # names with that entity prefix so the plan carries executable dotted
+        # paths.  Generic: the prefix comes from observed evidence only, never
+        # from a hostname or provider vocabulary.
+        if jid is None or title is None:
+            hint=candidate.detail_url_field or ""
+            prefix=hint.split(".",1)[0] if "." in hint and hint.split(".",1)[0] in fields else None
+            def _qualify(leaf:Any)->str|None:
+                if not isinstance(leaf,str) or not leaf:return None
+                return f"{prefix}.{leaf}" if prefix else leaf
+            if jid is None:
+                jid=_qualify(candidate.response_shape.get("inferred_job_id_field"))
+            if title is None:
+                title=_qualify(candidate.response_shape.get("inferred_job_title_field"))
         structurally_high=candidate.confidence=="HIGH" and bool(candidate.response_shape.get("candidate_list_path")) and bool(jid and title) and not candidate.rejection_reasons
         medium=candidate.confidence=="MEDIUM" and not candidate.rejection_reasons
         sensitive_request=any(v=="[REDACTED]" for v in list(candidate.query_params.values())+list(candidate.request_body_shape.values()))
@@ -85,7 +102,13 @@ class CollectionPlanBuilder:
         detail_executable=detail not in ("DETAIL_DOM","DETAIL_HTTP_HTML") or bool(url_field or detail_template)
         is_state=candidate.source_type=="SERIALIZED_STATE"
         inconsistent_total=(isinstance(candidate.observed_total,int) and isinstance(candidate.observed_list_length,int) and candidate.observed_total<candidate.observed_list_length)
-        executable=structurally_high and (is_state or candidate.replayable) and pagination!="UNKNOWN" and detail_executable and (not sensitive_request or candidate.method=="POST") and not inconsistent_total
+        # STEP73: an embedded state snapshot has no request pagination — the page
+        # state is the entire observable payload. A structurally sound state
+        # candidate stays executable even when no pagination semantics were
+        # inferable; the collector forces SINGLE_RESPONSE and completeness stays
+        # honest under the STEP70 contract.
+        pagination_ok=(pagination!="UNKNOWN") or is_state
+        executable=structurally_high and (is_state or candidate.replayable) and pagination_ok and detail_executable and (not sensitive_request or candidate.method=="POST") and not inconsistent_total
         mode="SERIALIZED_STATE" if structurally_high and is_state else ("BROWSER_API" if structurally_high and (browser_required or sensitive_request) else ("HTTP_API" if structurally_high else "UNSUPPORTED"))
         warnings=(["BROWSER_API_NOT_REPLAYABLE"] if structurally_high and not candidate.replayable else (["API_PLAN_NOT_EXECUTABLE"] if structurally_high and not executable else [])) if structurally_high else ["PLAN_REQUIRES_REVIEW" if medium else "PLAN_UNSUPPORTED"]
         if inconsistent_total:
@@ -94,7 +117,7 @@ class CollectionPlanBuilder:
             review_required=medium or (structurally_high and not executable),list_endpoint=candidate.url,list_method=candidate.method,pagination_type=pagination,
             page_param=result.detected_pagination.page_param,offset_param=result.detected_pagination.page_param if pagination=="OFFSET" else None,page_size_param=result.detected_pagination.page_size_param,cursor_param=result.detected_pagination.cursor_param,
             next_cursor_field=result.detected_pagination.next_cursor_field,has_more_field=result.detected_pagination.has_more_field,
-            initial_values=candidate.safe_request_values,query_values={k:v for k,v in candidate.query_params.items() if v!="[REDACTED]"} if candidate.method=="POST" else {},body_encoding="FORM" if "application/x-www-form-urlencoded" in (candidate.request_content_type or "").lower() else "JSON",observed_list_length=candidate.observed_list_length,total_field=None if inconsistent_total else candidate.response_shape.get("total_field"),list_path=candidate.response_shape.get("candidate_list_path"),list_item_path=candidate.list_item_path,job_id_field=jid,job_title_field=title,
+            initial_values=candidate.safe_request_values,query_values={k:v for k,v in candidate.query_params.items() if v!="[REDACTED]"} if candidate.method=="POST" else {},body_encoding="FORM" if "application/x-www-form-urlencoded" in (candidate.request_content_type or "").lower() else "JSON",observed_list_length=candidate.observed_list_length,observed_total=candidate.observed_total,total_field=None if inconsistent_total else candidate.response_shape.get("total_field"),list_path=candidate.response_shape.get("candidate_list_path"),list_item_path=candidate.list_item_path,job_id_field=jid,job_title_field=title,
             detail_mode=detail,detail_endpoint_template=detail_template,detail_method=detail_candidate.method if detail_candidate else None,detail_id_field=jid,detail_url_field=url_field,browser_trigger="AUTO_PAGINATION" if mode=="BROWSER_API" else None,
             detail_title_selector=detail_dom.get("title_selector"),detail_location_selector=detail_dom.get("location_selector"),detail_department_selector=detail_dom.get("department_selector"),detail_employment_type_selector=detail_dom.get("employment_type_selector"),detail_jd_selector=detail_dom.get("jd_selector"),
             scope=result.detected_scope,confidence=candidate.confidence,evidence=candidate.evidence,visible_total=result.dom_fallback.get("visible_result_count"),navigation_audit=result.detail_dom.get("navigation_audit") or [],source_index=candidate.source_index,originating_titles=result.dom_fallback.get("originating_titles") or {},originating_ids=result.dom_fallback.get("originating_ids") or {},
@@ -108,7 +131,11 @@ class CollectionPlanBuilder:
             warnings=list(warnings)+[f"MISSING_{gap}" for gap in gaps]
         update={"executable":executable,"warnings":warnings}
         if not executable and mode in ("HTTP_API","BROWSER_API","SERIALIZED_STATE"):update["review_required"]=True
-        return api_plan.model_copy(update=update)
+        final_plan=api_plan.model_copy(update=update)
+        # Private execution context survives only this in-process handoff.  It
+        # is intentionally absent from CollectionPlan serialization.
+        final_plan._runtime_query_params=dict(getattr(candidate,"_runtime_query_params",{}))
+        return final_plan
 
     def _dom_plan(self,result:DiscoveryResult)->CollectionPlan|None:
         links=result.dom_fallback.get("possible_detail_links") or []
@@ -117,7 +144,8 @@ class CollectionPlanBuilder:
         parity=result.dom_fallback.get("card_link_parity");independent_parity=parity=="CARD_LINK_PARITY" or parity is None
         complete=(not result.visible_total_conflict and ((visible is None and independent_parity) or visible==len(links) or (dynamic and bool(links))))
         pagination=result.detected_pagination.pagination_type if result.detected_pagination.pagination_type in ("LOAD_MORE","INFINITE_SCROLL") else "NONE"
-        return CollectionPlan(source_url=result.source_url,company=result.company,mode="DOM",executable=complete,review_required=not complete,pagination_type=pagination,detail_mode="DETAIL_REQUIRED",
+        mode="HTML" if result.dom_fallback.get("ssr_html_links") and not dynamic else "DOM"
+        return CollectionPlan(source_url=result.source_url,company=result.company,mode=mode,executable=complete,review_required=not complete,pagination_type=pagination,detail_mode="DETAIL_HTTP_HTML",detail_url_field="detailUrl" if mode=="HTML" else None,
             job_link_selector=result.dom_fallback.get("possible_title_selector"),job_title_selector=result.dom_fallback.get("possible_title_selector"),allowed_detail_urls=links,
             trusted_detail_hosts=result.dom_fallback.get("trusted_detail_hosts") or [],detail_title_selector=result.detail_dom.get("title_selector"),detail_location_selector=result.detail_dom.get("location_selector"),
             detail_department_selector=result.detail_dom.get("department_selector"),detail_employment_type_selector=result.detail_dom.get("employment_type_selector"),detail_jd_selector=result.detail_dom.get("jd_selector"),originating_titles=result.dom_fallback.get("originating_titles") or {},originating_ids=result.dom_fallback.get("originating_ids") or {},
@@ -128,7 +156,17 @@ class CollectionPlanBuilder:
     def _runtime_plan(self,result:DiscoveryResult)->CollectionPlan|None:
         source=result.runtime_source
         if source is None or not source.records:return None
-        executable=bool(source.executable)
+        # STEP72: a HIGH-confidence confirmed runtime path with stable id/title
+        # fields is executable even when the snapshot is a partial view of a
+        # larger runtime (total > record_count, pagination not validated). The
+        # collector reads exactly the confirmed path, reconciles against the
+        # runtime total, and fails closed to INCOMPLETE — it can never
+        # overclaim COMPLETE for a partial snapshot.
+        executable=bool(source.executable) or (
+            source.confidence=="HIGH" and bool(source.source_path)
+            and bool(source.job_id_field) and bool(source.job_title_field)
+            and int(source.record_count or 0)>=2
+        )
         # STEP 54B: propagate the organic detail-request contract captured at
         # discovery time. Field names only — every scope/decoder value inside
         # the contract already came from observed runtime evidence. detail_mode
@@ -168,7 +206,11 @@ class CollectionPlanBuilder:
         validator=CollectionPlanValidator()
         def rank(plan:CollectionPlan):
             valid=validator.validate(plan).valid
-            tier=4 if valid and plan.confidence=="HIGH" and plan.mode in ("HTTP_API","BROWSER_API","SERIALIZED_STATE","BROWSER_RUNTIME_DATA") else 3 if valid and plan.confidence=="HIGH" and plan.mode=="DOM" else 2 if plan.review_required else 1
+            # A confirmed SSR list is cheaper and more stable than replaying a
+            # browser runtime snapshot.  Keep API/state plans above both; this
+            # only resolves the direct-HTML versus runtime tie.
+            high_ready=valid and plan.executable and plan.confidence=="HIGH"
+            tier=5 if high_ready and plan.mode in ("HTTP_API","BROWSER_API","SERIALIZED_STATE") else 4.5 if high_ready and plan.mode=="HTML" else 4 if high_ready and plan.mode=="BROWSER_RUNTIME_DATA" else 3 if high_ready and plan.mode=="DOM" else 2 if plan.review_required else 1
             list_sufficient=plan.detail_mode=="LIST_SUFFICIENT" and plan.mode in ("HTTP_API","BROWSER_API","SERIALIZED_STATE","BROWSER_RUNTIME_DATA")
             return list_sufficient,tier,plan.confidence=="HIGH",plan.mode!="UNSUPPORTED"
         return max(plans,key=rank)

@@ -68,7 +68,9 @@ def test_jd_not_found_is_detail_failure():
     assert result.metrics.details_succeeded==0 and result.metrics.details_failed==1 and any("JD_NOT_FOUND" in x for x in result.errors)
 
 def test_explainable_duplicate_audit_allows_complete():
-    a=raw(1);a["applyUrl"]="https://x.test/jobs/1";b=dict(a)
+    # STEP 70 treats a record-level detail URL as a required detail stage.
+    # This test exercises only explainable list duplicate accounting.
+    a=raw(1);b=dict(a)
     p=plan();result=GenericHttpCollector(p,Client([{"data":{"items":[a,b],"total":2}}])).collect()
     assert result.status=="COMPLETE" and result.duplicate_audit["collapsed_count"]==1 and result.duplicate_audit["unexplained_count"]==0
 def test_unexplained_duplicate_is_incomplete():

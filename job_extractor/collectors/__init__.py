@@ -1,8 +1,9 @@
 from job_extractor.collectors.generic_http import GenericHttpCollector
 from job_extractor.collectors.generic_dom import GenericDomCollector
+from job_extractor.collectors.generic_html import GenericHtmlCollector
 from job_extractor.collectors.generic_detail import GenericHttpDetailCollector
 from job_extractor.collectors.generic_browser_api import GenericBrowserApiCollector
 from job_extractor.collectors.generic_state import GenericSerializedStateCollector
 from job_extractor.collectors.generic_runtime_data import GenericRuntimeDataCollector
 from job_extractor.collectors.generic_ats import GenericATSCollector
-__all__=["GenericHttpCollector","GenericDomCollector","GenericHttpDetailCollector","GenericBrowserApiCollector","GenericSerializedStateCollector","GenericRuntimeDataCollector","GenericATSCollector"]
+__all__=["GenericHttpCollector","GenericDomCollector","GenericHtmlCollector","GenericHttpDetailCollector","GenericBrowserApiCollector","GenericSerializedStateCollector","GenericRuntimeDataCollector","GenericATSCollector"]

@@ -10,7 +10,7 @@ def canonical(name: str) -> str:
 
 
 ROLE_SUFFIXES = {
-    "id": ("jobid", "positionid", "postingid", "postid", "requisitionid"),
+    "id": ("jobid", "positionid", "postingid", "postid", "requisitionid", "demandcode"),
     # Public job-list APIs commonly use jobName/postName/jobAdName.  These
     # are structural role names, not provider-specific vocabulary.
     "title": ("jobtitle", "jobname", "jobadname", "positionname", "positiontitle", "postingtitle", "postname", "requisitiontitle"),
@@ -118,6 +118,8 @@ JD_REQUIREMENT_FIELDS = (
     "qualifications", "qualification", "jobRequirements", "requirementsDesc",
     "requirements_description", "abilityRequirement", "ability_requirement",
     "competency", "competencies",
+    # hotjob.cn (wecruit) detail API: service conditions half (STEP94M evidence).
+    "serviceCondition", "service_condition",
 )
 
 # Well-known wrapper objects that may hold JD sub-fields (e.g. zhiye's

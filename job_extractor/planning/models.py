@@ -1,12 +1,12 @@
 from __future__ import annotations
 from typing import Any,Literal
-from pydantic import BaseModel,Field
+from pydantic import BaseModel,Field,PrivateAttr
 from job_extractor.discovery.models import ATSProfile
 
 class CollectionPlan(BaseModel):
     source_url:str
     company:str|None=None
-    mode:Literal["HTTP_API","BROWSER_API","SERIALIZED_STATE","BROWSER_RUNTIME_DATA","DOM","UNSUPPORTED"]
+    mode:Literal["HTTP_API","BROWSER_API","SERIALIZED_STATE","BROWSER_RUNTIME_DATA","DOM","HTML","UNSUPPORTED"]
     browser_trigger: str|None = None
     executable:bool=False
     review_required:bool=False
@@ -24,6 +24,9 @@ class CollectionPlan(BaseModel):
     query_values:dict[str,Any]=Field(default_factory=dict)
     body_encoding:Literal["JSON","FORM"]="JSON"
     observed_list_length:int|None=None
+    # Safe discovery evidence only.  This is the total returned by the
+    # browser's native list request and contains no request context.
+    observed_total:int|None=None
     list_path:str|None=None
     list_item_path:str|None=None
     job_id_field:str|None=None
@@ -72,6 +75,9 @@ class CollectionPlan(BaseModel):
     observed_endpoints:list[str]=Field(default_factory=list)
     ats_profile:ATSProfile|None=None
     runtime_source:dict[str,Any]=Field(default_factory=dict)
+    # Process-local replay context for redacted query values.  This must never
+    # become part of a serialized plan or any collection/report artifact.
+    _runtime_query_params:dict[str,Any]=PrivateAttr(default_factory=dict)
 
 class PlanValidation(BaseModel):
     valid:bool

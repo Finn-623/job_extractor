@@ -15,8 +15,18 @@ env/
 *.key
 *.pem
 
+# Authentication / request dumps (file-type scoped; never matches *.py source)
+*_curl.txt
+curl*.txt
+cookies*
+tokens*
+credentials*
+sessions*
+*.har
+
 # Pytest / coverage
 .pytest_cache/
+.pytest-tmp/
 .pytest-*/
 .pytest*/
 .coverage
@@ -34,6 +44,15 @@ Thumbs.db
 *.tmp
 *.temp
 *.log
+
+# Private historical artifacts
+archive/
+
+# Runtime scratch dirs
+logs/
+debug/
+tmp/
+temp/
 
 # Runtime artifacts
 .step35/
@@ -61,6 +80,7 @@ artifacts/
 .playwright/
 
 # Local database / runtime storage
+*.db
 *.sqlite
 *.sqlite3
 

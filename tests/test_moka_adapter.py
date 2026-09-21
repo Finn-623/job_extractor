@@ -77,3 +77,42 @@ def test_detail_failure_is_incomplete():
     assert r.status=="INCOMPLETE" and a.details_failed==1 and r.errors
 def test_empty_collection_complete():
     r=adapter(total=0).collect(URL); assert r.status=="COMPLETE" and r.total_unique==0
+
+# -- STEP96.4: site-level company attribution ---------------------------------
+def _html(name='"name":"广东领益智造股份有限公司"', site_name=None, share=None, title=None, org="lingyiitech", site_id="172618"):
+    inner=f'{{"org":{{"id":"{org}","name":"AcmeOrg"::{name}}},"site":{{"siteId":{site_id},"siteName":{site_name or "null"},"applyShareTitle":{share or "null"}}},"siteId":"{site_id}","aesIv":"1234567890abcdef"}}'
+    inner=inner.replace('"name":"AcmeOrg"::',name).replace('"siteName":null','"siteName":null').replace('"applyShareTitle":null','"applyShareTitle":null')
+    if title: inner=f"<html><title>{title}</title><div>{inner}</div></html>"
+    else: inner=f"<html><div>{inner}</div></html>"
+    return inner
+
+def test_step964_site_title_beats_tenant_org_name():
+    """#1 org=广东领益智造股份有限公司 + site 主体立敏达科技 → 立敏达科技。"""
+    H=_html(title="立敏达科技 - 校园招聘", site_name='"领益智造校园招聘（本硕博）-LMD"',
+            share='"立敏达2027届校园招聘"')
+    s=MokaAdapter.parse_scope("https://app.mokahr.com/campus-recruitment/lingyiitech/172618",H)
+    assert s.company=="立敏达科技"
+    assert "广东领益智造" not in (s.company or "")
+
+def test_step964_org_fallback_when_no_site_subject():
+    """#2 site 层无任何名称 → fallback org/tenant name。"""
+    H=_html(org="acme", site_id="123")
+    H=H.replace('"name":"广东领益智造股份有限公司"','"name":"Acme"')
+    s=MokaAdapter.parse_scope("https://app.mokahr.com/campus-recruitment/acme/123",H)
+    assert s.company=="Acme"
+
+def test_step964_never_takes_first_global_name():
+    """#3 多个 name 并存时不得取第一个全局 name（租户 org 名）。"""
+    # org name first, siteName later; and title also present → title wins.
+    H=_html(title="立敏达科技 - 校园招聘", site_name='"立敏达科技（分站）"')
+    s=MokaAdapter.parse_scope("https://app.mokahr.com/campus-recruitment/lingyiitech/172618",H)
+    assert s.company=="立敏达科技"
+    # Without title, siteName must beat the first global org name.
+    H2=_html(site_name='"立敏达科技（分站）"')
+    s2=MokaAdapter.parse_scope("https://app.mokahr.com/campus-recruitment/lingyiitech/172618",H2)
+    assert s2.company=="立敏达科技（分站）"
+
+def test_step964_existing_org_only_scope_unregressed():
+    """#4 原有 org-only 初始化（Acme）不受影响。"""
+    s=MokaAdapter.parse_scope(URL,HTML)
+    assert (s.org_id,s.site_id,s.site,s.company)==("acme",123,"campus","Acme")

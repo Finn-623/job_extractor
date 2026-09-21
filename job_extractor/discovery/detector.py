@@ -1,6 +1,6 @@
 from __future__ import annotations
-import json,re
-from dataclasses import dataclass
+import json,os,re
+from dataclasses import dataclass,field
 from datetime import datetime
 from time import perf_counter
 from typing import Any
@@ -14,8 +14,8 @@ from job_extractor.discovery.boot_recovery import classify_boot_state,reload_all
 from job_extractor.discovery.pagination_semantics import infer_pagination_from_schema
 from job_extractor.discovery.scorer import confidence,reliable_list_candidate,score_detail,score_list
 from job_extractor.discovery.dom_semantics import extract_company,extract_detail_dom,filter_detail_links,first_real_url,related_detail_hosts,repeated_job_cards,repeated_job_links,route_changed,semantic_html_detail
-from job_extractor.discovery.dynamic import graphql_shape,is_pagination_control,navigation_trust,safe_graphql_body,serialized_states,visible_total_evidence,wait_for_dynamic_jd,wait_for_hydration,wait_for_readiness_consensus
-from job_extractor.discovery.sources import embedded_sources,recruitment_entries,select_terminal_actions,spa_action_inventory,classify_request,rank_spa_action
+from job_extractor.discovery.dynamic import graphql_shape,is_pagination_control,navigation_trust,safe_graphql_body,serialized_states,visible_total_evidence,wait_for_dynamic_jd,wait_for_hydration,wait_for_readiness_consensus,window_state_blobs
+from job_extractor.discovery.sources import embedded_sources,recruitment_entries,select_terminal_actions,spa_action_inventory,classify_request,rank_spa_action,trigger_job_page_search
 from job_extractor.discovery.ats import profile_from_discovery
 from job_extractor.discovery.containers import bind_total_candidates,list_container_evidence
 from job_extractor import __version__
@@ -25,46 +25,29 @@ class _Observation:
     url:str; method:str; body:dict[str,Any]; query:dict[str,Any]; payload:Any; phase:str; replayable:bool=True; source_index:int|None=None; request_content_type:str|None=None
     origin_url:str|None=None; page_url:str|None=None; trigger_action_id:str|None=None; trigger_action_text:str|None=None; trigger_action_type:str|None=None
     provenance_trust:str="TRUSTED"; provenance_rejection:str|None=None
+    runtime_query:dict[str,Any]=field(default_factory=dict)
+
+
+class _SourceDiscoveryComplete(Exception):
+    """Internal control flow: a usable source is already sufficient for Stage 1."""
 
 class GenericApiDetector:
     threshold=10
-    def __init__(self,browser_factory=BrowserRuntime,timeout_ms:int=15000,source_budget_seconds:int=50):
+    def __init__(self,browser_factory=BrowserRuntime,timeout_ms:int=15000,source_budget_seconds:int=25):
         self.browser_factory=browser_factory; self.timeout_ms=timeout_ms; self.source_budget_seconds=source_budget_seconds
-    _JOB_PAGE_NODE_SELECTOR='a,button,[role="button"],[data-route],li'
+    _JOB_PAGE_NODE_SELECTOR='a,button,[role="button"],[role="menuitem"],[data-route],li'
+
+    def _stage_one_complete(self, observations:list[_Observation], observation_policy:dict[str,Any], expired:bool)->bool:
+        """Keep optional page/detail enrichment outside the source-discovery budget."""
+        if expired:
+            return True
+        if observation_policy.get("reason") != "SOURCE_FOUND_EARLY_EXIT":
+            return False
+        return any(self._reliable_list_source(candidate) for candidate in self._rank(observations))
 
     @classmethod
     def _job_page_search_trigger(cls,page)->list[str]:
-        """Perform at most two safe job/search-semantic actions on the supplied position page."""
-        script="""()=>Array.from(document.querySelectorAll('a,button,[role="button"],[data-route],li')).map((n,i)=>({i,text:(n.innerText||n.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' '),href:(n.getAttribute&&(n.getAttribute('href')||n.getAttribute('data-route')))||''}))"""
-        try:
-            nodes=page.evaluate(script)
-        except Exception:
-            return []
-        if not isinstance(nodes,list):
-            return []
-        positive=("全部职位","职位列表","在招职位","查看职位","搜索职位","职位搜索","校园招聘","社会招聘","招聘职位","职位机会","all jobs","view jobs","search jobs","职位")
-        negative=("登录","注册","隐私","筛选","filter","下一页","上一页","客服","投递","首页")
-        ranked=[]
-        for node in nodes:
-            if not isinstance(node,dict):
-                continue
-            text=str(node.get("text") or "").strip()
-            value=(text+" "+str(node.get("href") or "")).lower()
-            if not text or len(text)>40 or any(x.lower() in value for x in negative):
-                continue
-            score=sum(4 for term in positive if term.lower() in value)
-            if score>0:
-                ranked.append((score,node))
-        ranked.sort(key=lambda item:-item[0])
-        clicked=[]
-        for _score,node in ranked[:2]:
-            try:
-                page.locator(cls._JOB_PAGE_NODE_SELECTOR).nth(int(node["i"])).click(timeout=3000)
-                page.wait_for_timeout(2000)
-                clicked.append(str(node.get("text"))[:40])
-            except Exception:
-                pass
-        return clicked
+        return trigger_job_page_search(page,cls._JOB_PAGE_NODE_SELECTOR)
 
     @staticmethod
     def _body(request)->dict[str,Any]:
@@ -188,7 +171,7 @@ class GenericApiDetector:
         if any(term in clean.lower() for term in ("privacy", "policy", "config")) and "NON_JOB_SEMANTIC_SOURCE" not in shape.setdefault("rejection_reasons",[]):
             shape["rejection_reasons"].append("NON_JOB_SEMANTIC_SOURCE")
         if observation.provenance_rejection and observation.provenance_rejection not in shape.setdefault("rejection_reasons",[]):shape["rejection_reasons"].append(observation.provenance_rejection)
-        return ApiCandidate(url=clean,method=observation.method,score=score,confidence=confidence(score),
+        candidate=ApiCandidate(url=clean,method=observation.method,score=score,confidence=confidence(score),
             request_body_shape=request_shape(observation.body),query_params=query,
             safe_request_values=safe_values,request_content_type=observation.request_content_type,
             response_shape=shape,evidence=evidence,sample_job_hint=safe_business_data(hint),observed_list_length=length,
@@ -196,6 +179,11 @@ class GenericApiDetector:
             observed_unique_ids=unique_ids,detail_url_field=url_field,detail_url_coverage=url_coverage,
             homogeneity_score=shape.get("homogeneity_score",0.0),job_entity_density=shape.get("job_entity_density",0.0),
             rejection_reasons=shape.get("rejection_reasons",[]),observed_company_count=len(company_names),list_item_path=shape.get("list_item_path"),replayable=replayable,graphql_operation=shape.get("graphql_operation"),graphql_page_info_path=shape.get("graphql_page_info_path"),source_type="SERIALIZED_STATE" if observation.method=="STATE" else ("GRAPHQL" if gql else "NETWORK_JSON"),source_index=observation.source_index,provenance=provenance,observed_phase="POST_ROUTE_NETWORK" if observation.phase=="POST_ROUTE_NETWORK" else observation.phase)
+        # Retain only values that the safe candidate view deliberately hid.
+        # Public query parameters remain in query_params and persisted plans.
+        candidate._runtime_query_params={key:value for key,value in observation.runtime_query.items()
+                                         if query.get(key)=="[REDACTED]"}
+        return candidate
     @staticmethod
     def _rank(observations:list[_Observation],detail:bool=False)->list[ApiCandidate]:
         grouped={}; counts={}
@@ -210,13 +198,36 @@ class GenericApiDetector:
         return reliable_list_candidate(candidate)
     def discover(self,url:str,budget=None,terminal_mode:bool=False,upstream_entry_action:RecruitmentAction|None=None)->DiscoveryResult:
         started=datetime.now(); clock=perf_counter(); observations=[]; phase=["TERMINAL_INITIAL" if terminal_mode else "INITIAL"]; summary=NetworkSummary(); dom={};detail_dom={};warnings=[];company=None;pagination_override=None;inventory=[];total_evidence=[];total_conflict=False;entries=[]
+        timing_enabled=os.getenv("STEP95G_TIMING")=="1"; timings:dict[str,float]={}; events:dict[str,float]={}
+        def timed(name:str,started_at:float)->None:
+            if timing_enabled:timings[name]=timings.get(name,0.0)+(perf_counter()-started_at)
+        def event(name:str)->None:
+            if timing_enabled and name not in events:events[name]=perf_counter()-clock
+        def write_timing()->None:
+            if not timing_enabled:return
+            lines=["Stage1 timing:"]
+            for name,value in timings.items():lines.append(f"- {name}: {value:.3f}s")
+            for name,value in events.items():lines.append(f"- {name}: {value:.3f}s")
+            lines.append(f"- total_discover_duration: {perf_counter()-clock:.3f}s")
+            with open("/tmp/job_extractor_step95g_timing.log","w",encoding="utf-8") as handle:
+                handle.write("\n".join(lines)+"\n")
         terminal_trace=TerminalActivationTrace(terminal_url=url,scope="UNKNOWN",activation_started_at=started,upstream_entry_action=upstream_entry_action) if terminal_mode else None
         terminal_network=[];terminal_dom=[];terminal_actions=[];terminal_states=[];terminal_frames=[];runtime_source=None;internal_trace=[]
         activity_clock=ActivityClock();boot_reload_count=0;boot_attempts=[];domcontentloaded=False
-        def _expired():return (perf_counter()-clock)>self.source_budget_seconds
+        # Terminal activation supplies a shared monotonic budget.  Honour it
+        # here so an invisible downstream probe cannot outlive the caller's
+        # deadline before the CLI has a chance to render a terminal result.
+        discovery_budget_seconds=min(self.source_budget_seconds, budget.remaining) if budget is not None else self.source_budget_seconds
+        def _expired():return (perf_counter()-clock)>discovery_budget_seconds or bool(budget is not None and budget.expired)
+        terminal_failure=None
+        if budget is not None and budget.expired:
+            write_timing()
+            return DiscoveryResult(source_url=url,status="TIMEOUT",network_summary=summary,warnings=["SOURCE_DISCOVERY_TIMEOUT"],failure_classification="SOURCE_DISCOVERY_TIMEOUT",started_at=started,finished_at=datetime.now(),elapsed_seconds=perf_counter()-clock)
         try:
+            browser_setup_started=perf_counter()
             with self.browser_factory(timeout_ms=self.timeout_ms) as runtime:
                 page=runtime.page
+                timed("browser_setup",browser_setup_started)
                 def dom_snapshot():
                     try:
                         body=page.locator("body").inner_text(timeout=3000)[:20000]
@@ -262,7 +273,8 @@ class GenericApiDetector:
                     if not isinstance(payload,(dict,list)):return
                     summary.json_candidates+=1;summary.phase_json_candidates[phase[0]]=summary.phase_json_candidates.get(phase[0],0)+1; clean,query=safe_url(request.url)
                     activity_clock.record_json(request.url)
-                    observation = _Observation(request.url,request.method,self._body(request),query,payload,phase[0],request_content_type=request.headers.get("content-type"))
+                    raw_query=dict(parse_qsl(urlsplit(request.url).query,keep_blank_values=True))
+                    observation = _Observation(request.url,request.method,self._body(request),query,payload,phase[0],request_content_type=request.headers.get("content-type"),runtime_query=raw_query)
                     observations.append(observation)
                     # Strong boot-recovery evidence is deliberately structural:
                     # reuse the normal generic list scorer/reliability gate,
@@ -270,20 +282,49 @@ class GenericApiDetector:
                     # proof that a real list request has occurred.
                     if self._reliable_list_source(self._candidate(observation)):
                         activity_clock.record_reliable_list()
+                        event("first_candidate_seen")
                 page.on("response",observe)
+                navigation_started=perf_counter()
                 try:
                     page.goto(url,wait_until="domcontentloaded",timeout=self.timeout_ms)
                     domcontentloaded=True
                 except PlaywrightTimeoutError:
                     warnings.append("NAVIGATION_TIMEOUT_CONTINUING")
+                timed("page_navigation",navigation_started)
+                # STEP78A: page-side scripts can reset the freshly loaded
+                # document to about:blank within seconds of navigation (live
+                # evidence: goto → 22s idle with no detector code in between
+                # still ends at page.url == about:blank). Snapshot the served
+                # first-response HTML immediately so embedded-state extraction
+                # later in this flow can still read the markup the server
+                # delivered. No host-specific logic.
+                initial_inspect_started=perf_counter()
+                try:served_html=page.content()
+                except Exception:served_html=""
                 phase[0]="TERMINAL_HYDRATION" if terminal_mode else "HYDRATION";hydration=wait_for_hydration(page,lambda:len(observations))
                 if not hydration["stabilized"]:warnings.append("HYDRATION_TIMEOUT")
+                timed("dom_ready_initial_html_inspect",initial_inspect_started)
+                # Landing pages often load only campaign metadata.  Before
+                # spending the primary observation window, take one existing
+                # safe, job-semantic navigation when no credible source has
+                # appeared.  The response listener is already attached.
+                safe_navigation_taken=False
+                quick_rank=self._rank(observations)
+                quick_source=next((candidate for candidate in quick_rank if self._reliable_list_source(candidate)),None)
+                if not quick_source and not _expired():
+                    phase[0]="SAFE_JOB_NAVIGATION"
+                    triggered=self._job_page_search_trigger(page)
+                    if triggered:
+                        safe_navigation_taken=True
+                        page.wait_for_timeout(2000)
+                    phase[0]="TERMINAL_HYDRATION" if terminal_mode else "HYDRATION"
                 # Activity-aware observation window (STEP 53D): a handful of early
                 # portal-config JSONs reaching a stable DOM does NOT mean the page
                 # is done loading.  Keep observing until network activity has been
                 # quiet, the DOM is stable, and no job-semantic request is pending —
                 # bounded by a hard maximum deadline.  A HIGH-confidence source
                 # found early still exits quickly instead of idling.
+                network_observation_started=perf_counter()
                 if not _expired():
                     observation_policy=wait_for_activity_quiet(
                         page,activity_clock,dom_snapshot,
@@ -295,6 +336,7 @@ class GenericApiDetector:
                         # No job-semantic request has been seen yet: give a bounded
                         # extra chance for slow SPA chains (generic, not site-tied).
                         wait_for_readiness_consensus(page,lambda:len(observations),timeout_ms=3000)
+                timed("network_observation",network_observation_started)
                 # STEP 53E: a quiet SPA that had activity but never triggered a
                 # job request may be stuck during boot.  This is intentionally
                 # evaluated before state/source ranking and is bounded to one
@@ -302,6 +344,18 @@ class GenericApiDetector:
                 # state so stale first-attempt candidates cannot affect ranking.
                 initial_attempt_rank=self._rank(observations)
                 initial_attempt_source=next((c for c in initial_attempt_rank if self._reliable_list_source(c)),None)
+                # Some SPAs finish their initial route transition only after
+                # hydration.  Retry only when the first attempt did not
+                # actually navigate and no credible source has appeared.
+                if not initial_attempt_source and not safe_navigation_taken and not _expired():
+                    phase[0]="SAFE_JOB_NAVIGATION"
+                    triggered=self._job_page_search_trigger(page)
+                    if triggered:
+                        safe_navigation_taken=True
+                        page.wait_for_timeout(2000)
+                        initial_attempt_rank=self._rank(observations)
+                        initial_attempt_source=next((c for c in initial_attempt_rank if self._reliable_list_source(c)),None)
+                    phase[0]="TERMINAL_HYDRATION" if terminal_mode else "HYDRATION"
                 boot_text=page.locator("body").inner_text(timeout=3000)[:20000]
                 boot_snapshot=dom_snapshot()
                 boot_environment_failure=bool(re.search(r"(?i)(site can.t be reached|dns_probe|err_[a-z_]+|service unavailable|bad gateway)",boot_text))
@@ -359,11 +413,63 @@ class GenericApiDetector:
                         if retry_decision.state=="QUIET_BOOT_STALL":warnings.append("BOOT_STALL_UNRECOVERED")
                         elif retry_source:warnings.append("BOOT_STALL_RECOVERED")
                 summary.boot_recovery={"reload_count":boot_reload_count,"attempts":boot_attempts,"max_reloads":1}
-                states=list(serialized_states(page)) if not _expired() else []
+                # Stage 1 has its answer once the observation policy found a
+                # reliable list source.  DOM/detail enrichment below is useful
+                # only after source discovery and must never turn a quick source
+                # hit into a detail-render wait.  Likewise, the source budget is
+                # a real boundary rather than a warning followed by more probes.
+                if self._stage_one_complete(observations,summary.observation_policy,_expired()):
+                    event("source_found_early_exit")
+                    if _expired() and "SOURCE_DISCOVERY_TIMEOUT" not in warnings:
+                        warnings.append("SOURCE_DISCOVERY_TIMEOUT")
+                    # STEP96: the early exit skips the later extract_company()
+                    # call, leaving result.company unresolved for sources that
+                    # are found quickly.  Fill it from the same safe evidence
+                    # (structured metadata / page title) before bailing out.
+                    if not company:
+                        try:company=extract_company(page)
+                        except Exception:pass
+                    raise _SourceDiscoveryComplete()
+                # STEP78: SSR states are present in the first HTML response —
+                # extraction is a cheap, non-blocking read of markup the page
+                # already served, so it must run even when the observation
+                # budget expired during the activity-quiet wait. A fully
+                # server-rendered list never emits job-semantic XHRs, so that
+                # wait idles to its deadline and the previous budget guard
+                # discarded data already in hand (EMBEDDED_JOB_DISCOVERY_MISS).
+                serialized_state_started=perf_counter()
+                states=list(serialized_states(page))
                 for state_index,state in enumerate(states):
                     observations.append(_Observation(url,"STATE",{}, {},state,"HYDRATION",False,state_index))
                     if terminal_mode:
                         terminal_states.append({"source":"script[type=application/json]/__NEXT_DATA__","json_paths":list(state)[:50] if isinstance(state,dict) else [],"array_lengths":{},"sample_field_names":list(state)[:50] if isinstance(state,dict) else [],"job_likeness":0,"rejection_reason":"LOW_JOB_ENTITY_DENSITY"})
+                # STEP73: raw-HTML window-global states (window.__INITIAL_DATA__ /
+                # window.__INITIAL_STATE__ / window.__NUXT__) enter the same STATE
+                # STEP78A: extract window blobs from the HTML snapshot taken
+                # right after navigation. Some sites blank their own document
+                # between navigation and this point (no detector reload/close
+                # happens in between), so the live DOM may no longer contain
+                # the served markup. The snapshot is the same first-response
+                # HTML the SERIALIZED_STATE collector refetches later, keeping
+                # source_index alignment. If even the snapshot is an empty
+                # stub, refetch the first document generically over HTTP,
+                # mirroring the collector's raw fetch. No host-specific logic.
+                extraction_html=served_html
+                if len(extraction_html)<=256:
+                    try:
+                        import httpx
+                        extraction_html=httpx.get(url,timeout=15,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}).text
+                    except Exception:
+                        extraction_html=""
+                try:
+                    window_blobs=window_state_blobs(extraction_html)
+                except Exception:
+                    window_blobs=[]
+                for blob_offset,blob in enumerate(window_blobs):
+                    state_index=len(states)+blob_offset
+                    observations.append(_Observation(url,"STATE",{}, {},blob,"HYDRATION",False,state_index))
+                    if terminal_mode:
+                        terminal_states.append({"source":"window.__INITIAL_DATA__/__INITIAL_STATE__/__NUXT__","json_paths":list(blob)[:50] if isinstance(blob,dict) else [],"array_lengths":{},"sample_field_names":list(blob)[:50] if isinstance(blob,dict) else [],"job_likeness":0,"rejection_reason":"LOW_JOB_ENTITY_DENSITY"})
                 if terminal_mode:
                     for frame in page.frames:
                         terminal_frames.append({"frame_url":frame.url,"title":"","recruitment_semantics":bool(re.search(r"(?i)(job|career|recruit|招聘|职位)",frame.url)),"job_like_requests":False})
@@ -371,6 +477,7 @@ class GenericApiDetector:
                 entries=recruitment_entries(page,url)
                 company=extract_company(page)
                 text=page.locator("body").inner_text(timeout=3000)[:20000]
+                timed("serialized_state_script_inspection",serialized_state_started)
                 if terminal_mode:
                     terminal_dom.append(dom_snapshot())
                     job_entries=[entry for entry in entries if re.search(r"(?i)#/job/",entry.url) and len(entry.text)>20]
@@ -412,12 +519,7 @@ class GenericApiDetector:
                             inventory.append(CandidateSource(source_type="RUNTIME_STATE",url=url,status="CANDIDATE",score=15,confidence="HIGH",evidence=observed_runtime.evidence,metadata={"mechanism":observed_runtime.mechanism,"record_count":observed_runtime.record_count,"source_path":observed_runtime.source_path}))
                     except Exception:
                         pass
-                if not initial_probable and not _expired():
-                    triggered=self._job_page_search_trigger(page)
-                    if triggered:
-                        page.wait_for_timeout(2000)
-                        initial_rank=self._rank(observations);initial_probable=initial_rank[0] if initial_rank and initial_rank[0].score>=self.threshold else None
-                internal_trace=[]
+                optional_probes_started=perf_counter();internal_trace=[]
                 if not initial_probable and not _expired():
                     from job_extractor.discovery.internal_navigation import run_internal_job_navigation
                     def _rank_now():
@@ -425,6 +527,7 @@ class GenericApiDetector:
                         reliable=next((candidate for candidate in ranked if self._reliable_list_source(candidate)),None)
                         return (reliable,reliable.score) if reliable else (None,0)
                     initial_probable,internal_trace=run_internal_job_navigation(page,url,observations,rank_fn=_rank_now,deadline_check=_expired)
+                timed("optional_probes",optional_probes_started)
                 links=page.locator('a[href]'); hrefs=[]
                 for i in range(min(links.count(),1000)):
                     href=links.nth(i).get_attribute("href") or ""; label=(links.nth(i).inner_text() or "").strip()
@@ -433,6 +536,11 @@ class GenericApiDetector:
                 all_accepted,rejected_links=filter_detail_links(hrefs,url,structural_links)
                 observed_links=filter_detail_links([(x,"") for x in structural_links],url,structural_links)[0] if structural_links else all_accepted
                 observed_links=list(dict.fromkeys(observed_links))
+                try:html_snapshot=page.content()
+                except Exception:html_snapshot=""
+                # ``observed_links`` are absolute, whereas SSR markup usually
+                # preserves relative hrefs.  Compare the captured raw hrefs.
+                ssr_links=sum(1 for href,_label in hrefs if urljoin(url,href) in observed_links and href in html_snapshot)>=2
                 trusted_hosts=related_detail_hosts(url,observed_links)
                 complex_count=len(structural_links)
                 try:
@@ -456,7 +564,7 @@ class GenericApiDetector:
                 card_titles={x["detail_link"]:x["title"] for x in cards if x.get("detail_link") and x.get("title")}
                 card_ids={x["detail_link"]:x["explicit_id"] for x in cards if x.get("detail_link") and x.get("explicit_id")}
                 extra_noncard=[x for x in all_accepted if x not in set(structural_links)]
-                dom={"status":dom_status,"job_card_count":len(cards) or len(observed_links) or complex_count,"visible_result_count":result_count,"possible_title_selector":"a[href]" if observed_links else None,"possible_detail_links":observed_links[:500],"complex_job_nodes":complex_count,"rejected_link_count":len(rejected_links),"trusted_detail_hosts":trusted_hosts,"serialized_state_count":sum(o.method=="STATE" for o in observations),"job_cards":cards[:500],"originating_titles":card_titles,"originating_ids":card_ids,"card_link_parity":"CARD_LINK_PARITY" if len(cards)==len(observed_links) and cards else "MISSING_CARD_LINKS" if len(cards)>len(observed_links) else "EXTRA_NONCARD_LINKS","extra_noncard_links":extra_noncard[:100]}
+                dom={"status":dom_status,"job_card_count":len(cards) or len(observed_links) or complex_count,"visible_result_count":result_count,"possible_title_selector":"a[href]" if observed_links else None,"possible_detail_links":observed_links[:500],"complex_job_nodes":complex_count,"rejected_link_count":len(rejected_links),"trusted_detail_hosts":trusted_hosts,"serialized_state_count":sum(o.method=="STATE" for o in observations),"ssr_html_links":ssr_links,"job_cards":cards[:500],"originating_titles":card_titles,"originating_ids":card_ids,"card_link_parity":"CARD_LINK_PARITY" if len(cards)==len(observed_links) and cards else "MISSING_CARD_LINKS" if len(cards)>len(observed_links) else "EXTRA_NONCARD_LINKS","extra_noncard_links":extra_noncard[:100]}
                 detail_hint=None;detail_url_field=None;sample_title="";sample_id=""
                 detail_source=next((c for c in initial_rank if c.confidence=="HIGH" and first_real_url(c.sample_job_hint,url)[0]),initial_probable)
                 if detail_source:
@@ -562,13 +670,26 @@ class GenericApiDetector:
                             detail_dom.update({"status":"DETAIL_DOM","sample_url":chosen_detail,"url_field":detail_url_field,"url_template":prior_template,"route_changed":route_changed(before_url,page.url),"navigation_audit":[audit]})
                         else:warnings.append("JD_RENDER_TIMEOUT")
                     except Exception:warnings.append("SPA_DETAIL_NOT_RESOLVED")
+        except _SourceDiscoveryComplete:
+            pass
         except BrowserRuntimeError as exc:
-            return DiscoveryResult(source_url=url,status="BLOCKED",network_summary=summary,warnings=[str(exc)],started_at=started,finished_at=datetime.now(),elapsed_seconds=perf_counter()-clock)
+            write_timing()
+            return DiscoveryResult(source_url=url,status="FAILED",network_summary=summary,warnings=[str(exc)],failure_classification="BROWSER_RUNTIME_ERROR",started_at=started,finished_at=datetime.now(),elapsed_seconds=perf_counter()-clock)
         except Exception as exc:
             warnings.append(f"DISCOVERY_PAGE_ERROR {type(exc).__name__}")
+            terminal_failure=f"DISCOVERY_PAGE_ERROR {type(exc).__name__}"
+        except BaseException as exc:
+            # STEP76A2: driver/transport level signals (KeyboardInterrupt,
+            # SystemExit, greenlet death inside the sync playwright driver)
+            # must never end the parent process silently — convert them into a
+            # terminal Python-level failure the CLI can render.
+            write_timing()
+            return DiscoveryResult(source_url=url,status="FAILED",network_summary=summary,warnings=[f"PROCESS_TERMINATION_{type(exc).__name__}"],failure_classification=f"PROCESS_TERMINATION_{type(exc).__name__}",started_at=started,finished_at=datetime.now(),elapsed_seconds=perf_counter()-clock)
+        candidate_validation_started=perf_counter()
         list_observations=[o for o in observations if o.phase!="DETAIL"]
         detail_observations=[o for o in observations if o.phase=="DETAIL"]
         lists=self._rank(list_observations); details=[x for x in self._rank(detail_observations,True) if x.score>=self.threshold]
+        timed("candidate_validation",candidate_validation_started)
         rejected=[]
         seen_rejected=set()
         for observation in list_observations:
@@ -592,7 +713,7 @@ class GenericApiDetector:
             company=probable.sample_job_hint.get("company_name")
             if not company and isinstance(probable.sample_job_hint.get("company"),dict):company=probable.sample_job_hint["company"].get("name")
         summary.job_api_candidates=sum(x.score>=self.threshold for x in lists)
-        pagination=self._pagination(observations,probable)
+        pagination_started=perf_counter();pagination=self._pagination(observations,probable);timed("pagination_inference",pagination_started)
         if probable and probable.graphql_operation and pagination.pagination_type=="UNKNOWN":warnings.append("GRAPHQL_PAGINATION_UNKNOWN")
         explicitly_complete=bool(probable and ((probable.observed_total is not None and probable.observed_total==probable.observed_list_length) or probable.observed_has_more is False))
         if pagination_override and not explicitly_complete:pagination.pagination_type=pagination_override
@@ -603,8 +724,11 @@ class GenericApiDetector:
             bounded=(probable.observed_list_length or 0)>=20 and probable.detail_url_coverage==1.0 and probable.observed_unique_ids==min(probable.observed_list_length or 0,20)
             if bounded and not pagination_inputs and pagination_override is None:
                 probable.evidence.append("bounded unpaginated response has unique IDs and complete detail URL coverage")
-        status="DISCOVERED" if (probable or (runtime_source is not None and runtime_source.records)) else ("PARTIAL" if lists or dom.get("status") in ("DOM_LIST_DETECTED","DOM_COMPLEX_DETECTED") else "NOT_FOUND")
-        if status=="NOT_FOUND":warnings.append("NO_DYNAMIC_JOB_SOURCE")
+        # A credible source captured before the shared deadline remains a
+        # discovery success even if optional DOM/detail observation consumes
+        # the rest of that budget afterwards.
+        status="FAILED" if terminal_failure else ("DISCOVERED" if (probable or (runtime_source is not None and runtime_source.records)) else ("TIMEOUT" if _expired() else ("PARTIAL" if lists or dom.get("status") in ("DOM_LIST_DETECTED","DOM_COMPLEX_DETECTED") else "UNSUPPORTED")))
+        if status in ("NOT_FOUND","UNSUPPORTED"):warnings.append("NO_DYNAMIC_JOB_SOURCE")
         fields={str(x).lower() for x in (probable.response_shape.get("sample_field_names",[]) if probable else [])}
         job_fields={"job_id","jobid","jobtitle","positionid","positionname","requisitionid","department","location","locations","requirements","responsibilities","applyurl","detailurl"}
         probable_is_job=bool(fields & job_fields)
@@ -617,12 +741,13 @@ class GenericApiDetector:
         if probable and not probable_is_job:warnings.append("RECRUITMENT_ANNOUNCEMENT_SOURCE")
         classification="UNKNOWN_ATS" if probable and probable_is_job else ("RECRUITMENT_PORTAL" if entries else ("NON_JOB_DESTINATION" if not inventory else "RECRUITMENT_PORTAL"))
         profile=profile_from_discovery(DiscoveryResult(source_url=url,status=status,probable_list_api=probable,detected_pagination=pagination,detected_scope=self._scope(url,observations,text if 'text' in locals() else ""),candidate_list_apis=lists[:10])) if probable and probable_is_job else None
-        result=DiscoveryResult(source_url=url,status=status,candidate_list_apis=lists[:10],candidate_detail_apis=details[:10],probable_list_api=probable,rejected_candidates=rejected[:20],
+        finalization_started=perf_counter();result=DiscoveryResult(source_url=url,status=status,candidate_list_apis=lists[:10],candidate_detail_apis=details[:10],probable_list_api=probable,rejected_candidates=rejected[:20],
             detected_pagination=pagination,detected_scope=self._scope(url,observations,text if 'text' in locals() else ""),network_summary=summary,dom_fallback=dom,detail_dom=detail_dom,company=company,tool_version=__version__,warnings=warnings,
-            source_inventory=inventory,visible_total_evidence=[VisibleTotalEvidence(**x) for x in total_evidence],visible_total_conflict=total_conflict,
+            source_inventory=inventory,visible_total_evidence=[VisibleTotalEvidence(**x) for x in total_evidence],visible_total_conflict=total_conflict,failure_classification=terminal_failure,
             list_containers=[container] if 'container' in locals() and container else [],page_type=page_type,recruitment_entries=entries,ats_classification=classification,ats_profile=profile,runtime_source=runtime_source,
             internal_navigation_trace=internal_trace,
             started_at=started,finished_at=datetime.now(),elapsed_seconds=perf_counter()-clock)
+        timed("build_final_discovery_result",finalization_started)
         if _expired():
             if "SOURCE_DISCOVERY_TIMEOUT" not in result.warnings:result.warnings.append("SOURCE_DISCOVERY_TIMEOUT")
             result.failure_classification=result.failure_classification or "SOURCE_DISCOVERY_TIMEOUT"
@@ -645,4 +770,5 @@ class GenericApiDetector:
             terminal_trace.candidate_lifecycle=lifecycle
             terminal_trace.empty_terminal_diagnostic={"terminal_actions_executed":bool(terminal_actions),"route_changed":any(item.get("route_changed") for item in terminal_actions),"new_xhr_fetch":any(item.get("phase","").endswith("POST") for item in terminal_network),"repeated_job_entities":any(item.get("classification")=="CANDIDATE" and (item.get("array_length") or 0)>=2 for item in terminal_network),"dom_job_cards":any(item.get("job_card_count",0)>0 for item in terminal_dom),"serialized_job_state":bool(terminal_states),"known_ats_redirect":False,"candidates_rejected":bool(lifecycle and not result.probable_list_api),"reason":result.warnings[-1] if result.warnings else None}
             result.terminal_trace=terminal_trace
+        write_timing()
         return result

@@ -98,12 +98,46 @@ def test_job_page_search_trigger_clicks_only_job_semantic_controls():
         {"i": 3, "text": "筛选", "href": ""},
     ])
     clicked = GenericApiDetector._job_page_search_trigger(page)
-    assert set(page.clicked) == {0, 2} and len(clicked) == 2 and "社会招聘" in clicked and "全部职位" in clicked
+    assert page.clicked == [2] and clicked == ["全部职位"]
 
 
 def test_job_page_filter_control_is_not_triggered():
     page = TriggerPage([{"i": 0, "text": "筛选", "href": ""}, {"i": 1, "text": "职位列表", "href": ""}])
     GenericApiDetector._job_page_search_trigger(page)
+    assert page.clicked == [1]
+
+
+def test_immediate_apply_is_a_single_safe_job_navigation():
+    page = TriggerPage([{"i": 0, "text": "立即投递", "href": ""}, {"i": 1, "text": "登录", "href": ""}])
+    assert GenericApiDetector._job_page_search_trigger(page) == ["立即投递"]
+    assert page.clicked == [0]
+
+
+def test_job_delivery_anchor_is_not_rejected_as_generic_apply_action():
+    page = TriggerPage([
+        {"i": 0, "text": "岗位投递", "href": ""},
+        {"i": 1, "text": "立即投递", "href": ""},
+    ])
+    assert GenericApiDetector._job_page_search_trigger(page) == ["岗位投递"]
+    assert page.clicked == [0]
+
+
+def test_campus_menuitem_is_a_safe_recruitment_navigation():
+    page = TriggerPage([
+        {"i": 0, "text": "Home", "href": ""},
+        {"i": 1, "text": "Campus", "href": ""},
+        {"i": 2, "text": "Login", "href": ""},
+    ])
+    assert GenericApiDetector._job_page_search_trigger(page) == ["Campus"]
+    assert page.clicked == [1]
+
+
+def test_active_menuitem_is_not_clicked_again():
+    page = TriggerPage([
+        {"i": 0, "text": "Campus", "href": "", "active": True},
+        {"i": 1, "text": "立即投递", "href": ""},
+    ])
+    assert GenericApiDetector._job_page_search_trigger(page) == ["立即投递"]
     assert page.clicked == [1]
 
 

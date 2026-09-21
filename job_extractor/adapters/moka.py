@@ -1,5 +1,5 @@
 from __future__ import annotations
-import base64, html, json, re
+import base64, html, json, re, math
 from dataclasses import dataclass
 from datetime import datetime
 from html.parser import HTMLParser
@@ -23,11 +23,15 @@ class _Text(HTMLParser):
 class MokaAdapter(BaseAdapter):
     platform_name="moka"; priority=20
     LIST_PATH="/api/outer/ats-apply/website/jobs/v2"; DETAIL_PATH="/api/outer/ats-apply/website/job"
-    def __init__(self,timeout=20.0,page_size=20,max_pages=1000,client=None):
+    def __init__(self,timeout=20.0,page_size=20,max_pages=1000,client=None,progress_callback=None):
         self.page_size,self.max_pages=page_size,max_pages
         self.client=client or httpx.Client(timeout=timeout,follow_redirects=True,headers={"User-Agent":"JobExtractor/0.1 (+https://mokahr.com)"})
         self.scope=None; self.page_count=self.list_requests=self.details_attempted=0
         self.details_succeeded=self.details_failed=0; self.detail_strategy="DETAIL_REQUIRED"; self.elapsed_seconds=0.0
+        self.progress_callback=progress_callback
+    def _observe(self, event, **data):
+        if self.progress_callback:
+            self.progress_callback(event, **data)
     @classmethod
     def match(cls,url):
         h=(urlparse(url).hostname or "").lower(); return h=="mokahr.com" or h.endswith(".mokahr.com")
@@ -47,7 +51,35 @@ class MokaAdapter(BaseAdapter):
         if f("id") and f("id")!=p[1]: raise MokaResponseError("org id does not match page initialization")
         if not f("aesIv"): raise MokaResponseError("page initialization did not contain aesIv")
         mode="campus" if p[0].startswith("campus") else "social"
-        return MokaScope(p[1],sid,mode,mode,f("name"),f("aesIv"))
+        # STEP96.4: the org/tenant name (first global "name") belongs to the
+        # Moka tenant, NOT necessarily to the recruiting entity of this site.
+        # Anchor the company to the current site subject first: the page <title>
+        # (e.g. "立敏达科技 - 校园招聘"), then the campaign share title, then
+        # the site/campaign name; only fall back to the org name when no
+        # site-layer name exists.  Never collapse tenant slug -> org/group name
+        # (lingyiitech -> 广东领益智造股份有限公司 must not override the real
+        # subject 立敏达科技).
+        generic={"jobs","careers","招聘","校园招聘","社会招聘","招贤纳士","加入我们"}
+        company=None
+        m=re.search(r"<title>([^<]+)</title>",text)
+        if m:
+            value=re.sub(r"\s+"," ",m.group(1)).strip()
+            value=re.split(r"\s+[-–—|]\s+",value)[0].strip()
+            value=re.sub(r"(?:\s*[-–—|]\s*)?(?:校园招聘|社会招聘|春季招聘|秋季招聘|招聘|jobs|careers)\s*$","",value,flags=re.I).strip(" -|–—·")
+            if value and value.lower() not in generic and len(value)<=30: company=value
+        if not company:
+            m=re.search(r'"applyShareTitle"\s*:\s*"([^"]*)"',text)
+            if m:
+                value=re.sub(r"(?:\d{4}届)?(?:校园招聘|社会招聘|招聘)\s*$","",(m.group(1) or "").strip()).strip(" -|–—·")
+                if value and value.lower() not in generic and len(value)<=30: company=value
+        if not company:
+            m=re.search(r'"siteName"\s*:\s*"([^"]*)"',text)
+            if m:
+                value=(m.group(1) or "").strip()
+                if value and value.lower() not in generic: company=value
+        if not company:
+            company=f("name")  # org/tenant name, last resort only
+        return MokaScope(p[1],sid,mode,mode,company,f("aesIv"))
     @staticmethod
     def decode_response(p,iv):
         if "necromancer" in p:
@@ -88,11 +120,14 @@ class MokaAdapter(BaseAdapter):
     def collect(self,url):
         started=datetime.now(); clock=perf_counter(); errors=[]; jobs=[]; fetched=0; total=None
         try:
-            page=self.client.get(url); page.raise_for_status(); self.scope=self.parse_scope(url,page.text); base=self._base(url); raws=[]; offset=0
+            page=self.client.get(url); page.raise_for_status(); self.scope=self.parse_scope(url,page.text); self._observe("scope",company=self.scope.company); base=self._base(url); raws=[]; offset=0
             while self.page_count<self.max_pages:
                 self.list_requests+=1; body=self._request("POST",base+self.LIST_PATH,self.scope.aes_iv,json={"orgId":self.scope.org_id,"siteId":self.scope.site_id,"limit":self.page_size,"offset":offset,"needStat":True,"site":self.scope.site,"locale":"zh-CN"})
                 batch,total=self._list(body); self.page_count+=1; raws+=batch; fetched+=len(batch); offset+=len(batch)
+                self._observe("list",page=self.page_count,total=total,fetched=fetched,
+                              pages=math.ceil(total/self.page_size) if self.page_size else None)
                 if not batch or offset>=total: break
+            self._observe("list_complete",total=total,fetched=fetched)
             seen=set()
             for raw in raws:
                 jid=str(raw.get("id") or "")
@@ -105,6 +140,8 @@ class MokaAdapter(BaseAdapter):
                     if job: jobs.append(job)
                     self.details_succeeded+=1
                 except MokaResponseError as e: self.details_failed+=1; errors.append(f"detail {jid}: {e}")
+                self._observe("detail",done=self.details_attempted,total=len(seen) + len([x for x in raws if str(x.get("id") or "") not in seen]),
+                              ok=self.details_succeeded,fail=self.details_failed,title=raw.get("title"),job_id=jid)
         except (httpx.HTTPError,MokaResponseError) as e: errors.append(str(e))
         unique=len(jobs); status="COMPLETE" if total is not None and fetched==total and unique==total and not errors else ("FAILED" if total is None else "INCOMPLETE")
         self.elapsed_seconds=perf_counter()-clock

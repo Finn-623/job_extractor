@@ -390,6 +390,50 @@ class GenericRuntimeDataCollector:
             result.warnings.append("PARTIAL_COLLECTION")
         return result
 
+    def _read_confirmed_path(self, source: RuntimeJobSource) -> tuple[list[dict] | None, str | None]:
+        """STEP72: evaluate ONLY the discovery-confirmed runtime path on a live page.
+
+        No full-window rescan: discovery already located and validated the job
+        array; execution re-evaluates exactly that expression with a bounded
+        hydration poll. Fail-closed returns ([], reason) for missing/non-list
+        values; (None, None) only when the plan carries no confirmed path.
+        """
+        path = self.plan.runtime_source.get("source_path") if isinstance(self.plan.runtime_source, dict) else None
+        if not path:
+            return None, None
+        probe_js = (
+            "path => { try { const v = eval(path);"
+            " if (v === undefined || v === null) return {kind:'MISSING'};"
+            " if (!Array.isArray(v)) return {kind:'NOT_LIST', actual: typeof v};"
+            " return {kind:'LIST', value: v}; }"
+            " catch (e) { return {kind:'ERROR', message: String(e && e.message || e)}; } }"
+        )
+        browser = self.browser_factory
+        if browser is None:
+            from job_extractor.browser import BrowserRuntime as browser  # type: ignore
+        try:
+            with browser() as runtime:
+                page = runtime.page
+                page.goto(self.plan.source_url, wait_until="domcontentloaded")
+                value = None
+                for _ in range(10):
+                    value = page.evaluate(probe_js, path)
+                    if isinstance(value, dict) and value.get("kind") == "LIST":
+                        break
+                    page.wait_for_timeout(500)
+        except Exception as exc:
+            return [], f"RUNTIME_NAVIGATION_FAILED {type(exc).__name__}"
+        payload = value if isinstance(value, dict) else {}
+        kind = str(payload.get("kind") or "ERROR")
+        if kind == "LIST":
+            records = [dict(item) for item in (payload.get("value") or []) if isinstance(item, dict)]
+            return records, None
+        if kind == "MISSING":
+            return [], f"RUNTIME_PATH_NOT_FOUND {path}"
+        if kind == "NOT_LIST":
+            return [], f"RUNTIME_VALUE_NOT_LIST {path} actual={payload.get('actual')}"
+        return [], f"RUNTIME_EVAL_ERROR {path} {payload.get('message')}"
+
     def collect(self) -> CollectionResult:
         started = datetime.now(); clock = perf_counter()
         source = self._source()
@@ -402,5 +446,11 @@ class GenericRuntimeDataCollector:
         if self.observer is not None:
             observed = self.observer()
             return self._finish(source, list(observed.records), None, started, clock)
-        observed = build_runtime_source_candidate(self.plan.source_url, provider=source.provider, capability=source.capability, expected_total=source.total, request_limit=source.limit, request_offset=source.initial_offset, browser_factory=self.browser_factory)
-        return self._finish(source, list(observed.records), None, started, clock)
+        records, problem = self._read_confirmed_path(source)
+        if problem:
+            return CollectionResult(source_url=self.plan.source_url, platform="generic", company=self.plan.company, scope=self.plan.scope, status="FAILED", errors=[f"RUNTIME_PATH_FAIL_CLOSED: {problem}"], started_at=started, finished_at=datetime.now(), metrics=CollectionMetrics(elapsed_seconds=perf_counter() - clock, jd_strategy="DETAIL_REQUIRED", browser_pages_opened=1))
+        if records is None:
+            # No confirmed path on the plan: defensive legacy full-window scan.
+            observed = build_runtime_source_candidate(self.plan.source_url, provider=source.provider, capability=source.capability, expected_total=source.total, request_limit=source.limit, request_offset=source.initial_offset, browser_factory=self.browser_factory)
+            return self._finish(source, list(observed.records), None, started, clock)
+        return self._finish(source, records, None, started, clock)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Any
 
-SUPPORTED_MODES=("HTTP_API","BROWSER_API","SERIALIZED_STATE","DOM","BROWSER_RUNTIME_DATA")
+SUPPORTED_MODES=("HTTP_API","BROWSER_API","SERIALIZED_STATE","DOM","HTML","BROWSER_RUNTIME_DATA")
 
 GAP_REASONS={
     "EXECUTION_MODE":"UNSUPPORTED_EXECUTION_MODE",
@@ -46,6 +46,9 @@ def missing_fields(plan:Any)->list[str]:
     if mode=="DOM":
         if not plan.allowed_detail_urls:missing.append("ALLOWED_DETAIL_URLS")
         return missing
+    if mode=="HTML":
+        if not plan.allowed_detail_urls:missing.append("ALLOWED_DETAIL_URLS")
+        return missing
     if not plan.list_endpoint:missing.append("REQUEST_URL")
     if mode in ("HTTP_API","BROWSER_API") and plan.list_method not in ("GET","POST"):missing.append("REQUEST_METHOD")
     if not plan.list_path:missing.append("LIST_EXTRACTION")
@@ -85,6 +88,6 @@ def can_dispatch(plan:Any)->bool:
 
 def dispatch_target(plan:Any)->str|None:
     mode=getattr(plan,"mode",None)
-    return {"HTTP_API":"GenericHttpCollector","BROWSER_API":"GenericBrowserApiCollector",
+    return {"HTTP_API":"GenericHttpCollector","BROWSER_API":"GenericBrowserApiCollector","HTML":"GenericHtmlCollector",
             "SERIALIZED_STATE":"GenericSerializedStateCollector","DOM":"GenericDomCollector",
             "BROWSER_RUNTIME_DATA":"GenericRuntimeDataCollector"}.get(mode)
