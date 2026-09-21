@@ -140,13 +140,15 @@ output/
 
 有些网站完全无法自动发现（请求签名、加密参数、严格防护）。此时可以从浏览器开发者工具把岗位列表请求复制为 cURL，通过 `--list-curl` / `--detail-curl`（或 `--list-curl-file` / `--detail-curl-file`）交给程序继续采集。cURL 只被解析，绝不会被执行为 shell 命令。
 
-详细教程：[docs/MANUAL_CURL.md](docs/MANUAL_CURL.md)（待完成）
+详细教程：[docs/MANUAL_CURL.md](docs/MANUAL_CURL.md)
 
 ## 文档
 
-- [用户指南](docs/USER_GUIDE.md)（待完成）
-- [手动 cURL 指南](docs/MANUAL_CURL.md)（待完成）
-- [故障排查](docs/TROUBLESHOOTING.md)（待完成）
+- [用户指南](docs/USER_GUIDE.md)
+- [手动 cURL 指南](docs/MANUAL_CURL.md)
+- [故障排查](docs/TROUBLESHOOTING.md)
+- [更新日志](CHANGELOG.md)
+- [参与贡献](CONTRIBUTING.md)
 - [架构说明](docs/ARCHITECTURE.md)（待完成）
 
 ## 项目结构
@@ -171,7 +173,7 @@ main.py            # CLI 入口
 
 ## 安全提醒
 
-不要公开或提交 Cookie、Token、`Authorization` 头，或包含认证信息的 cURL 命令。参见 [SECURITY.md](SECURITY.md)（待添加）。
+不要公开或提交 Cookie、Token、`Authorization` 头，或包含认证信息的 cURL 命令。参见 [SECURITY.md](SECURITY.md)。
 
 ## 免责声明
 
@@ -179,4 +181,4 @@ main.py            # CLI 入口
 
 ## 许可证
 
-许可证信息将在公开发布前添加。
+本项目基于 [MIT License](LICENSE) 发布。

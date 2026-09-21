@@ -140,13 +140,15 @@ Some sites render their job list only in the browser. When plain HTTP collection
 
 Some websites cannot be auto-discovered at all (request signatures, encrypted parameters, strict protection). In that case, copy the job-list request from your browser's developer tools as cURL and pass it to the program with `--list-curl` / `--detail-curl` (or the `--list-curl-file` / `--detail-curl-file` variants). The cURL is parsed but never shell-executed.
 
-Detailed guide: [docs/MANUAL_CURL.md](docs/MANUAL_CURL.md) *(coming soon)*
+Detailed guide: [docs/MANUAL_CURL.md](docs/MANUAL_CURL.md)
 
 ## Documentation
 
-- [User Guide](docs/USER_GUIDE.md) *(coming soon)*
-- [Manual cURL Guide](docs/MANUAL_CURL.md) *(coming soon)*
-- [Troubleshooting](docs/TROUBLESHOOTING.md) *(coming soon)*
+- [User Guide](docs/USER_GUIDE.md)
+- [Manual cURL Guide](docs/MANUAL_CURL.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
 - [Architecture](docs/ARCHITECTURE.md) *(coming soon)*
 
 ## Project Structure
@@ -171,7 +173,7 @@ main.py            # CLI entry point
 
 ## Security
 
-Never share or commit cookies, tokens, `Authorization` headers, or cURL commands that contain authentication information. See [SECURITY.md](SECURITY.md) *(to be added)*.
+Never share or commit cookies, tokens, `Authorization` headers, or cURL commands that contain authentication information. See [SECURITY.md](SECURITY.md).
 
 ## Disclaimer
 
@@ -179,4 +181,4 @@ This project is intended for personal study, research, and data organization of 
 
 ## License
 
-License information will be added before the public release.
+Released under the [MIT License](LICENSE).
