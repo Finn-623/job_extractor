@@ -6,6 +6,7 @@
 """
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -77,3 +78,45 @@ def test_generator_reproduces_files(tmp_path):
     assert EXPECTED_FILES.issubset(produced)
     regenerated = json.loads((tmp_path / "jobs.json").read_text(encoding="utf-8"))
     assert len(regenerated["jobs"]) == 5
+
+
+def _workbook_content_snapshot(path: Path) -> dict:
+    """用 openpyxl 读取全部 sheet 的名称 / 维度 / cell 值。"""
+    workbook = load_workbook(path, read_only=True)
+    snapshot: dict = {}
+    for sheet in workbook.worksheets:
+        snapshot[sheet.title] = {
+            "dims": (sheet.max_row, sheet.max_column),
+            "cells": tuple(tuple(cell.value for cell in row) for row in sheet.iter_rows()),
+        }
+    workbook.close()
+    return snapshot
+
+
+def test_generator_deterministic(tmp_path):
+    """两次生成必须确定性：文本产物 byte-identical；xlsx 只要求 workbook 内容一致。
+
+    .xlsx 本质是 zip 包，打包元数据（内部时间戳/压缩顺序）允许少量字节差异——
+    只要 openpyxl 读到的 sheet 名称、维度与每个 cell 的值完全相同，即判定
+    xlsx deterministic（Release Gate 规则）。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "generate_example_output", REPO / "scripts" / "generate_example_output.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    dir_a, dir_b = tmp_path / "run_a", tmp_path / "run_b"
+    module.main(output_dir=dir_a)
+    module.main(output_dir=dir_b)
+
+    for name in ("jobs.json", "jobs.csv", "report.md", "collection.json"):
+        digest_a = hashlib.sha256((dir_a / name).read_bytes()).hexdigest()
+        digest_b = hashlib.sha256((dir_b / name).read_bytes()).hexdigest()
+        assert digest_a == digest_b, f"{name} 不是 byte deterministic"
+
+    assert _workbook_content_snapshot(dir_a / "jobs.xlsx") == _workbook_content_snapshot(
+        dir_b / "jobs.xlsx"
+    ), "jobs.xlsx workbook 内容不确定"

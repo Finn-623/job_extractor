@@ -146,13 +146,37 @@ def test_failed_run_writes_only_error_report(tmp_path, monkeypatch):
 
 
 def test_output_ignored_by_git():
+    """正式设计（12E）：output/ 只跟踪固定 skeleton，真实运行结果全部 ignore。"""
     from pathlib import Path
-    patterns = (Path(".gitignore").read_text(encoding="utf-8")).splitlines()
-    assert "output/" in patterns and "__pycache__/" in patterns
     import subprocess
-    tracked = subprocess.run(["git", "ls-files", "output"], capture_output=True, text=True,
-                             cwd=Path(__file__).parents[1]).stdout.strip()
-    assert tracked == ""
+
+    repo = Path(__file__).parents[1]
+    patterns = (repo / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "__pycache__/" in patterns
+    # Skeleton tracking rules, not the old blanket "output/" line.
+    for pattern in ("/output/*", "!/output/.gitkeep", "/output/_failed/*",
+                    "!/output/_failed/.gitkeep", "/output/_unknown/*",
+                    "!/output/_unknown/.gitkeep"):
+        assert pattern in patterns, pattern
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], capture_output=True, text=True, cwd=repo)
+
+    tracked = git("ls-files", "output/").stdout.strip().splitlines()
+    assert sorted(tracked) == [
+        "output/.gitkeep",
+        "output/_failed/.gitkeep",
+        "output/_unknown/.gitkeep",
+    ]
+
+    # Company dirs, timestamp dirs, run artifacts and failure reports stay ignored.
+    for path in ("output/Example Company/2026-01-01/jobs.json",
+                 "output/_unknown/2026-01-01/jobs.json",
+                 "output/_failed/example/2026-01-01/error_report.json"):
+        assert git("check-ignore", "--quiet", path).returncode == 0, path
+    # The skeleton files themselves must never be ignored.
+    for path in tracked:
+        assert git("check-ignore", "--quiet", path).returncode != 0, path
 
 
 def test_cli_routes_through_formal_layout(tmp_path):
