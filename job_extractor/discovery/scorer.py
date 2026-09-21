@@ -134,4 +134,6 @@ def reliable_list_candidate(candidate:Any)->bool:
     if not candidate or candidate.confidence!="HIGH" or candidate.rejection_reasons or candidate.job_entity_density<0.8:return False
     fields={str(x).lower() for x in candidate.response_shape.get("sample_field_names",[])}
     has_id,has_title=_role_fields(fields)
-    return has_id and has_title
+    # bool(): _role_fields returns sets; the trace stores this value verbatim
+    # and must carry a real boolean, not a truthy set.
+    return bool(has_id) and bool(has_title)

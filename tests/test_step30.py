@@ -19,8 +19,10 @@ def plan(**updates):
 
 
 def html(title="Engineer",body=None,requirements=None,footer="Employer marketing text"):
-    body=body or "Build reliable distributed systems and own delivery quality. "*3
-    requirements=requirements or "Bachelor degree, strong programming skills, and collaborative experience. "*2
+    # credible_jd floor: >=160 chars AND (signal words OR >=500 chars) — the
+    # fixture carries no signal vocabulary, so keep the default body >=500.
+    body=body or "Build reliable distributed systems and own delivery quality. "*6
+    requirements=requirements or "Bachelor degree, strong programming skills, and collaborative experience. "*4
     return f"""<html><body><header>Navigation</header><h1>{title}</h1>
       <div>岗位描述</div><div>{body}</div>
       <div>岗位要求</div><div>{requirements}</div>
@@ -99,7 +101,7 @@ def test_http_html_detail_mode_runs_end_to_end_and_reports_strategy():
 
 
 def test_failure_taxonomy_and_no_silent_navigation_failure():
-    assert DETAIL_FAILURE_CODES==("DETAIL_NAVIGATION_FAILED","DETAIL_SOURCE_NOT_FOUND","TITLE_MISMATCH","JD_CONTAINER_NOT_FOUND","JD_TOO_SHORT","DYNAMIC_RENDER_TIMEOUT","PARSE_FAILED")
+    assert DETAIL_FAILURE_CODES==("DETAIL_NAVIGATION_FAILED","DETAIL_SOURCE_NOT_FOUND","TITLE_MISMATCH","JD_CONTAINER_NOT_FOUND","JD_TOO_SHORT","DYNAMIC_RENDER_TIMEOUT","PARSE_FAILED","BOT_CHALLENGE")
     missing=semantic_html_detail("<h1>Engineer</h1><p>No semantic section</p>","Engineer")
     short=semantic_html_detail("<h1>Engineer</h1><div>岗位描述</div><p>short</p>","Engineer")
     assert missing["failure"]=="JD_CONTAINER_NOT_FOUND" and short["failure"]=="JD_TOO_SHORT"

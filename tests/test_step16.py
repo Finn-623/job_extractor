@@ -98,7 +98,7 @@ def test_browser_api_replay_uses_page_context_without_headers():
     class Page:
         def evaluate(self,script,arg):self.arg=arg;return {"items":[]}
     page=Page();response=_BrowserClient(page).request("POST","https://x.test/graphql",json={"query":"{}"})
-    assert response.json()=={"items":[]} and page.arg=={"url":"https://x.test/graphql","method":"POST","body":{"query":"{}"}}
+    assert response.json()=={"items":[]} and page.arg=={"url":"https://x.test/graphql","method":"POST","body":{"query":"{}"},"headers":{}}
 
 def test_redirect_chain_trust():
     assert navigation_trust("jobs.example","apply.example","apply.example",1,True)

@@ -314,7 +314,9 @@ def test_config_only_page_is_not_a_source():
     page = ScriptedPage(vclock, schedule=[(1000, "https://x.test/api/config", CONFIG_PAYLOAD),
                                           (1500, "https://x.test/api/city/list", CONFIG_PAYLOAD)])
     result = GenericApiDetector(lambda **_k: _Browser(page), timeout_ms=20000).discover("https://x.test/portal")
-    assert result.status == "NOT_FOUND"
+    # STEP74+: config-only pages end as UNSUPPORTED (NO_DYNAMIC_JOB_SOURCE),
+    # not the legacy NOT_FOUND terminal state.
+    assert result.status == "UNSUPPORTED"
     assert result.probable_list_api is None
     assert all(c.rejection_reasons for c in result.candidate_list_apis)
 

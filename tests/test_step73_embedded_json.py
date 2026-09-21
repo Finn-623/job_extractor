@@ -200,6 +200,7 @@ def test_builder_state_candidate_survives_unknown_pagination():
         trigger_action_type = None
         provenance_trust = "TRUSTED"
         provenance_rejection = None
+        runtime_query = {}
 
     candidate = GenericApiDetector._candidate(_Obs())
     assert candidate.source_type == "SERIALIZED_STATE"

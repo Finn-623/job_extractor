@@ -155,5 +155,11 @@ def test_cli_receives_terminal_result(monkeypatch, tmp_path):
     )
     result = runner.invoke(app, [URL])
     assert result.exit_code == 0
-    assert "Running automatic Generic API discovery" in result.output
-    assert "Discovery status: FAILED" in result.output
+    # STEP92+ CLI renders discovery failures through the Chinese progress UX:
+    # stage 1 fails with the UNSUPPORTED reason and offers the cURL fallback,
+    # instead of the legacy English "Running automatic Generic API discovery"
+    # / "Discovery status: FAILED" banner.
+    assert "识别招聘网站" in result.output
+    assert "自动识别失败" in result.output
+    assert "暂不支持该网站的自动抓取" in result.output
+    assert "可以使用 cURL 兜底" in result.output
