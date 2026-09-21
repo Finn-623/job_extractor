@@ -68,10 +68,22 @@ temp/
 .step45/
 .step46/
 
-# Generated reports / output
-output/
+# Generated reports / output.
+# The repository tracks only the fixed runtime directory skeleton
+# (output/.gitkeep, output/_failed/.gitkeep, output/_unknown/.gitkeep —
+# constants UNKNOWN/FAILED_ROOT in job_extractor/output_layout.py).
+# Every real run result (company dirs, timestamp dirs, jobs.json/xlsx/csv/
+# report.md, error_report.json) stays ignored.
 outputs/
 artifacts/
+/output/*
+!/output/.gitkeep
+!/output/_failed/
+/output/_failed/*
+!/output/_failed/.gitkeep
+!/output/_unknown/
+/output/_unknown/*
+!/output/_unknown/.gitkeep
 
 # Excel temporary files
 ~$*.xlsx
