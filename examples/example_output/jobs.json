@@ -1,0 +1,258 @@
+{
+  "source_url": "https://example.com/careers",
+  "platform": "generic",
+  "company": "Example Robotics Ltd.",
+  "scope": {},
+  "metrics": {
+    "list_requests": 2,
+    "detail_requests": 5,
+    "list_pages": 2,
+    "details_attempted": 5,
+    "details_succeeded": 5,
+    "details_failed": 0,
+    "details_required": 5,
+    "elapsed_seconds": 42.6,
+    "total_elapsed_seconds": 51.3,
+    "collection_elapsed_seconds": 42.6,
+    "page_size": 20,
+    "jd_strategy": "DETAIL_REQUIRED",
+    "browser_pages_opened": 0,
+    "browser_requests_observed": 0,
+    "browser_jobs_attempted": 0,
+    "browser_jobs_resolved": 0,
+    "browser_jobs_blocked": 0,
+    "browser_jobs_budget_skipped": 0,
+    "browser_dom_resolved": 0,
+    "browser_network_resolved": 0,
+    "detail_total": 0,
+    "detail_http_resolved": 0,
+    "detail_browser_resolved": 0,
+    "detail_blocked": 0,
+    "detail_failed": 0,
+    "detail_pending": 0,
+    "initial_load_seconds": 0.0,
+    "list_pagination_seconds": 0.0,
+    "detail_fallback_seconds": 0.0,
+    "normalize_seconds": 0.0,
+    "export_seconds": 0.0,
+    "pages_requested": 2,
+    "pages_succeeded": 2,
+    "raw_rows": 6,
+    "unique_jobs": 5,
+    "duplicate_jobs": 1,
+    "retry_count": 0,
+    "retry_sleep_seconds": 0.0,
+    "list_request_seconds": 0.0,
+    "detail_request_seconds": 18.4,
+    "average_list_request_seconds": 0.0,
+    "average_detail_request_seconds": 3.68,
+    "termination_reason": "TOTAL_REACHED",
+    "collection_mode": "generic",
+    "max_concurrency_observed": 1
+  },
+  "total_expected": 6,
+  "total_fetched": 6,
+  "total_unique": 5,
+  "status": "COMPLETE",
+  "jobs": [
+    {
+      "company": "Example Robotics Ltd.",
+      "job_id": "EX1001",
+      "job_title": "Procurement Graduate",
+      "job_category": "采购",
+      "department": "采购部",
+      "locations": [
+        "上海"
+      ],
+      "recruitment_type": "校园招聘",
+      "education": "本科",
+      "major": "采购/供应链相关",
+      "headcount": 5,
+      "responsibilities": [
+        "参与供应商寻源与评估，维护供应商档案",
+        "协助 RFQ 询价与报价比价分析",
+        "支持采购成本分析与降本项目",
+        "协助供应商日常管理与绩效考核"
+      ],
+      "requirements": [
+        "本科及以上学历，采购/供应链/商务相关专业",
+        "了解 RFQ 流程与基本成本分析方法",
+        "熟练使用 Excel",
+        "沟通能力强，具备供应商管理潜质"
+      ],
+      "full_jd": "岗位职责：\n1. 参与供应商寻源与评估，维护供应商档案\n2. 协助 RFQ 询价与报价比价分析\n3. 支持采购成本分析与降本项目\n4. 协助供应商日常管理与绩效考核\n\n任职要求：\n1. 本科及以上学历，采购/供应链/商务相关专业\n2. 了解 RFQ 流程与基本成本分析方法\n3. 熟练使用 Excel\n4. 沟通能力强，具备供应商管理潜质",
+      "apply_url": "https://jobs.example.com/position/EX1001",
+      "detail_url": "https://jobs.example.com/position/EX1001",
+      "source_url": "https://example.com/careers",
+      "publish_date": "2026-09-10",
+      "raw_data": {},
+      "collected_at": "2026-09-21T12:03:30"
+    },
+    {
+      "company": "Example Robotics Ltd.",
+      "job_id": "EX1002",
+      "job_title": "Supply Chain Analyst",
+      "job_category": "供应链",
+      "department": "供应链管理部",
+      "locations": [
+        "上海",
+        "苏州"
+      ],
+      "recruitment_type": "社会招聘",
+      "education": "本科",
+      "major": "供应链/统计/工业工程",
+      "headcount": 2,
+      "responsibilities": [
+        "负责库存数据分析与安全库存策略优化",
+        "参与产销协同计划（S&OP）编制",
+        "搭建供应链数据看板，输出月度分析报告",
+        "识别计划与履约环节的改进机会"
+      ],
+      "requirements": [
+        "本科及以上学历，供应链/统计/工业工程相关专业",
+        "2 年以上计划或数据分析经验",
+        "熟练使用 SQL 与 Python 做数据分析",
+        "逻辑清晰，能独立输出分析结论"
+      ],
+      "full_jd": "岗位职责：\n1. 负责库存数据分析与安全库存策略优化\n2. 参与产销协同计划（S&OP）编制\n3. 搭建供应链数据看板，输出月度分析报告\n4. 识别计划与履约环节的改进机会\n\n任职要求：\n1. 本科及以上学历，供应链/统计/工业工程相关专业\n2. 2 年以上计划或数据分析经验\n3. 熟练使用 SQL 与 Python 做数据分析\n4. 逻辑清晰，能独立输出分析结论",
+      "apply_url": "https://jobs.example.com/position/EX1002",
+      "detail_url": "https://jobs.example.com/position/EX1002",
+      "source_url": "https://example.com/careers",
+      "publish_date": "2026-09-05",
+      "raw_data": {},
+      "collected_at": "2026-09-21T12:03:30"
+    },
+    {
+      "company": "Example Robotics Ltd.",
+      "job_id": "EX1003",
+      "job_title": "Supplier Quality Engineer",
+      "job_category": "质量",
+      "department": "质量部",
+      "locations": [
+        "苏州"
+      ],
+      "recruitment_type": "社会招聘",
+      "education": "本科",
+      "major": "机械/材料/质量工程",
+      "headcount": 3,
+      "responsibilities": [
+        "负责供应商审核与质量体系评估",
+        "跟进来料与制程质量问题的闭环处理",
+        "推动供应商制程改善与质量能力提升",
+        "制定检验标准并培训供应商落地"
+      ],
+      "requirements": [
+        "本科及以上学历，机械/材料/质量相关专业",
+        "3 年以上制造业供应商质量管理经验",
+        "熟悉 8D、SPC、FMEA 等质量工具",
+        "有 ISO9001 内审员资格者优先"
+      ],
+      "full_jd": "岗位职责：\n1. 负责供应商审核与质量体系评估\n2. 跟进来料与制程质量问题的闭环处理\n3. 推动供应商制程改善与质量能力提升\n4. 制定检验标准并培训供应商落地\n\n任职要求：\n1. 本科及以上学历，机械/材料/质量相关专业\n2. 3 年以上制造业供应商质量管理经验\n3. 熟悉 8D、SPC、FMEA 等质量工具\n4. 有 ISO9001 内审员资格者优先",
+      "apply_url": "https://jobs.example.com/position/EX1003",
+      "detail_url": "https://jobs.example.com/position/EX1003",
+      "source_url": "https://example.com/careers",
+      "publish_date": "2026-09-12",
+      "raw_data": {},
+      "collected_at": "2026-09-21T12:03:30"
+    },
+    {
+      "company": "Example Robotics Ltd.",
+      "job_id": "EX1004",
+      "job_title": "Mechanical Engineer",
+      "job_category": "研发",
+      "department": "机械设计部",
+      "locations": [
+        "深圳"
+      ],
+      "recruitment_type": "社会招聘",
+      "education": "本科",
+      "major": "机械设计/机电一体化",
+      "headcount": 4,
+      "responsibilities": [
+        "负责新产品结构设计与 CAD 建模出图",
+        "参与产品从概念到量产的全流程开发",
+        "进行公差分析、选型与设计验证",
+        "配合工艺与供应商完成试产问题整改"
+      ],
+      "requirements": [
+        "本科及以上学历，机械设计相关专业",
+        "熟练使用 SolidWorks 或 Creo 等 CAD 工具",
+        "3 年以上机械/结构设计经验",
+        "熟悉常用材料与加工工艺"
+      ],
+      "full_jd": "岗位职责：\n1. 负责新产品结构设计与 CAD 建模出图\n2. 参与产品从概念到量产的全流程开发\n3. 进行公差分析、选型与设计验证\n4. 配合工艺与供应商完成试产问题整改\n\n任职要求：\n1. 本科及以上学历，机械设计相关专业\n2. 熟练使用 SolidWorks 或 Creo 等 CAD 工具\n3. 3 年以上机械/结构设计经验\n4. 熟悉常用材料与加工工艺",
+      "apply_url": "https://jobs.example.com/position/EX1004",
+      "detail_url": "https://jobs.example.com/position/EX1004",
+      "source_url": "https://example.com/careers",
+      "publish_date": "2026-09-08",
+      "raw_data": {},
+      "collected_at": "2026-09-21T12:03:30"
+    },
+    {
+      "company": "Example Robotics Ltd.",
+      "job_id": "EX1005",
+      "job_title": "Software Engineer",
+      "job_category": "研发",
+      "department": "软件平台部",
+      "locations": [
+        "深圳",
+        "远程"
+      ],
+      "recruitment_type": "社会招聘",
+      "education": "本科",
+      "major": "计算机/软件工程",
+      "headcount": 6,
+      "responsibilities": [
+        "负责内部平台后端系统的设计与开发",
+        "设计并维护稳定可靠的 RESTful APIs",
+        "优化系统性能与数据库查询",
+        "参与代码评审与技术方案设计"
+      ],
+      "requirements": [
+        "本科及以上学历，计算机相关专业",
+        "熟练掌握 Python，了解 Web 框架",
+        "熟悉关系型数据库与 API 设计规范",
+        "具备良好的工程习惯与团队协作意识"
+      ],
+      "full_jd": "岗位职责：\n1. 负责内部平台后端系统的设计与开发\n2. 设计并维护稳定可靠的 RESTful APIs\n3. 优化系统性能与数据库查询\n4. 参与代码评审与技术方案设计\n\n任职要求：\n1. 本科及以上学历，计算机相关专业\n2. 熟练掌握 Python，了解 Web 框架\n3. 熟悉关系型数据库与 API 设计规范\n4. 具备良好的工程习惯与团队协作意识",
+      "apply_url": "https://jobs.example.com/position/EX1005",
+      "detail_url": "https://jobs.example.com/position/EX1005",
+      "source_url": "https://example.com/careers",
+      "publish_date": "2026-09-15",
+      "raw_data": {},
+      "collected_at": "2026-09-21T12:03:30"
+    }
+  ],
+  "errors": [],
+  "warnings": [],
+  "data_completeness": {
+    "total_jobs": 5,
+    "complete_jobs": 5,
+    "missing_jd_jobs": 0,
+    "missing_requirements_jobs": 0,
+    "missing_responsibilities_jobs": 0,
+    "source_incomplete_jobs": 0,
+    "completeness_ratio": 1.0,
+    "jd_complete": 5,
+    "jd_incomplete": 0,
+    "jd_total": 5,
+    "jd_missing": 0,
+    "list_sufficient": 0,
+    "detail_required": 5,
+    "detail_attempted": 5,
+    "detail_succeeded": 5,
+    "detail_failed": 0,
+    "detail_pending": 0,
+    "source_requirements_absent": 0
+  },
+  "duplicate_audit": {
+    "raw_total": 6,
+    "raw_fetched": 6,
+    "unique_jobs": 5,
+    "duplicate_records": 1,
+    "source_cross_page_duplicates": true
+  },
+  "enrichment": {},
+  "started_at": "2026-09-21T12:00:00",
+  "finished_at": "2026-09-21T12:03:30"
+}

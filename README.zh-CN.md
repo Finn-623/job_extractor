@@ -142,6 +142,10 @@ output/
 
 详细教程：[docs/MANUAL_CURL.md](docs/MANUAL_CURL.md)
 
+## 示例输出
+
+在实际运行前，可以先查看[示例输出](examples/example_output/)，了解程序最终会生成哪些文件——完全虚构的数据（Example Robotics Ltd.），由同一套导出管线生成：`jobs.json`、`jobs.csv`、`jobs.xlsx`、`report.md`、`collection.json`。
+
 ## 文档
 
 - [用户指南](docs/USER_GUIDE.md)

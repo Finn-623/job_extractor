@@ -1,0 +1,21 @@
+{
+  "company": "Example Robotics Ltd.",
+  "source_url": "https://example.com/careers",
+  "started_at": "2026-09-21T12:00:00",
+  "finished_at": "2026-09-21T12:03:30",
+  "elapsed_seconds": 42.6,
+  "total_elapsed_seconds": 51.3,
+  "collection_elapsed_seconds": 42.6,
+  "collection_mode": "generic",
+  "total_expected": 6,
+  "total_fetched": 6,
+  "total_unique": 5,
+  "duplicate_jobs": 1,
+  "details_succeeded": 5,
+  "details_failed": 0,
+  "status": "COMPLETE",
+  "warnings": [],
+  "errors": [],
+  "fallback": null,
+  "detail_resolution": null
+}
