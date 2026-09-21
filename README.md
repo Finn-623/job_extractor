@@ -1,119 +1,182 @@
-# Job Extractor (V1)
+# Job Extractor
 
-对官方招聘页面 URL 自动发现数据源、采集全量职位列表、做有证据支撑的详情补全，并输出诚实标注完整性的报告（JSON / Excel / Markdown）。
+**English** | [中文文档](README.zh-CN.md)
 
-## Platforms
+Extract job listings and full job descriptions from recruitment websites into structured files for AI-assisted job recommendation, filtering and analysis.
 
-- Zhiye — READY
-- Moka — READY
-- Feishu — READY (Playwright browser runtime)
-- Generic — READY (V1：source discovery → generic plan → collection → detail enrichment → reporting)
+输入招聘网站 URL，自动提取岗位列表和完整 JD，并生成可直接交给 GPT 等 AI 使用的结构化文件，用于岗位推荐、筛选和分析。
 
-## V1 使用
+## Why Job Extractor?
+
+Recruitment websites differ wildly from company to company. When a company posts dozens or hundreds of openings, reading job descriptions one by one is slow and painful.
+
+Job Extractor turns a recruitment page into clean, structured data so that you — or an AI assistant — can process all jobs at once:
+
+```
+Recruitment Website
+      ↓
+ Job Extractor
+      ↓
+Structured Job Data   (jobs.json / jobs.csv / jobs.xlsx / report.md)
+      ↓
+    GPT / AI
+      ↓
+Job Recommendation / Filtering / Analysis
+```
+
+You no longer read jobs one by one. Extract once, then let AI do the reading.
+
+## Features
+
+- **Automatic job list discovery** — analyzes the site, finds the underlying job list API, and collects all postings with pagination
+- **Full JD extraction** — fetches complete job descriptions (responsibilities / requirements), not just titles
+- **Multi-platform support** — dedicated adapters for several recruitment platforms, plus a generic engine for unknown sites
+- **Deduplication** — repeated postings across pages are merged and audited
+- **Browser fallback** — JavaScript-rendered sites fall back to a headless browser automatically
+- **Manual cURL fallback** — protected sites accept a cURL request copied from your browser
+- **Multiple export formats** — JSON, CSV, XLSX and a Markdown report per run
+
+## AI Workflow
+
+Job Extractor handles extraction and structuring. The AI handles recommendation and analysis:
+
+1. Run Job Extractor on a recruitment URL
+2. Open the run directory and take `jobs.json` (or `jobs.csv` / `report.md`)
+3. Upload the file to ChatGPT or another AI assistant
+4. Ask, for example:
+
+   > "Based on my background and career goals, rank these jobs and recommend the best matches."
+
+## Supported Platforms
+
+Verified recruitment platforms:
+
+- **Moka** — Moka-powered career sites
+- **Feishu / Lark** recruitment sites
+- **Zhiye** — `*.zhiye.com` career sites
+- **Beisen CMS** — Beisen-powered career sites
+
+Other websites go through the **generic engine**, which auto-discovers the job list API and falls back to a headless browser when needed. Generic success depends on the site — treat it as experimental rather than guaranteed. Job Extractor does not promise support for every recruitment website.
+
+## Installation
+
+macOS / Linux:
 
 ```bash
-python main.py "<招聘页面URL>"
-```
-
-示例：
-
-```bash
-python main.py "https://careers.geelytech.com/campus"
-```
-
-默认运行全流程：source discovery → 采集计划 → 全量列表采集 →（有证据时）详情补全 → 报告输出。也可分步：`--discover`（只观测数据源）、`--plan`（生成采集计划）、`--collect-generic`（发现并执行采集）。
-
-### 输出位置与格式
-
-每次采集在 `~/.job_extractor/output/` 生成一个运行目录：
-
-```text
-jobs.json     机器可读，source of truth
-jobs.xlsx     Summary / Jobs / Data Quality 三个 sheet
-report.md     Markdown 报告（>50 jobs 自动切换紧凑摘要）
-```
-
-### Completeness / fail-closed 语义
-
-- 每个 job 的 JD 完整性逐条诚实计数：`FULL_TEXT`（全文）、`SUMMARY`（源站只给短摘要）、`ABSENT`（无 JD 字段）。
-- 源站只提供短摘要时，系统**不会自行补全 JD**，只如实标记 incomplete；缺证据时 detail enrichment 不猜测。
-- 无伪造 JD：所有 JD 内容均来自源站字段。
-
-### 已知边界（Post-V1）
-
-- 源站仅提供 teaser/短摘要（如 AECC）→ 该站 JD 完整率受限，fail-closed。
-- 源站无可观察的 identity-bound detail source（如 Sinomach）→ JD 仅限列表级。
-- 上游偶发重复投递（如 Hisense）→ 稳定 ID 去重正确合并，unique 数可能低于 reported_total。
-- 少量 DETAIL_EMPTY → fail-closed 标记 incomplete。
-
-## Unified JSON output
-
-Every completed run exports the same top-level fields: `source_url`, `platform`,
-`company`, `scope`, `metrics`, `total_expected`, `total_fetched`, `total_unique`,
-`status`, `errors`, and `jobs`. Platform response data remains available under
-each job's `raw_data`; response encryption keys, cookies, headers, and tokens are
-never included.
-
-## Collection reports
-
-Every completed collection creates one cross-platform-safe run directory under
-`~/.job_extractor/output/` containing:
-
-```text
-jobs.json
-jobs.xlsx
-report.md
-```
-
-JSON remains the machine-readable source of truth. The Excel workbook contains
-`Summary`, `Jobs`, and `Data Quality` sheets; Markdown automatically switches to
-compact job summaries when a run contains more than 50 jobs.
-
-跨平台招聘岗位提取工具。当前已支持 Zhiye、Moka 和 Feishu 平台的岗位采集；Generic 暂时只做平台识别。
-
-## 使用
-
-```bash
-python main.py <URL>
-```
-
-处理流程：
-
-```text
-URL Validation
-→ Adapter Registry
-→ Platform Detection
-→ Tenant Configuration
-→ Recruitment Scope
-→ API Collection
-→ Normalization
-→ JSON Export
-```
-
-Zhiye 会根据 URL 中的 `/campus/`、`/social/`、`/intern/` 路由限定招聘范围。列表已包含完整职责和要求时直接使用列表数据；缺少 JD 字段时才调用详情 API。
-
-## macOS 安装
-
-```bash
+git clone https://github.com/Finn-623/job_extractor.git
+cd job_extractor
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
-python main.py https://example.com/jobs
 ```
 
-## Windows 安装
+Windows (PowerShell):
 
 ```powershell
-py -m venv .venv
-.venv\Scripts\activate
+git clone https://github.com/Finn-623/job_extractor.git
+cd job_extractor
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 playwright install chromium
-python main.py https://example.com/jobs
 ```
 
-## 测试
+## Quick Start
 
 ```bash
-pytest -q
+python main.py "https://example.com/jobs"
 ```
+
+> `example.com` is a format illustration only, not a verified site. Use a real recruitment page URL.
+
+Useful options:
+
+```bash
+python main.py "URL" --scope campus     # resolve an ambiguous scope: campus, social, intern, all
+python main.py "URL" --discover         # observe and report probable job APIs only
+python main.py --list-curl "<curl>" --detail-curl "<curl>"   # manual cURL fallback
+```
+
+No `PYTHONPATH` or other environment setup is required — run it from the repository root.
+
+## Output
+
+Each successful run creates a timestamped directory:
+
+```
+output/
+└── Company Name/
+    └── 2026-01-01_120000/
+        ├── jobs.json         # machine-readable, best for AI / automation
+        ├── jobs.csv          # flat table for spreadsheets and quick analysis
+        ├── jobs.xlsx         # Excel workbook for human review
+        ├── report.md         # readable run summary, fine to upload to an AI
+        └── collection.json   # collection process metadata (timing, metrics, audit)
+```
+
+- **jobs.json** — structured job records including full JD text; the primary file for AI workflows
+- **jobs.csv** — one row per job for filtering and pivoting
+- **jobs.xlsx** — the same data formatted for Excel users
+- **report.md** — run overview: totals, completeness flags, per-job summary
+- **collection.json** — how the data was collected (mode, elapsed time, dedup audit)
+
+## Failed / Unknown Output
+
+- `output/_unknown/<timestamp>/` — the run could not determine a company name to name the directory
+- `output/_failed/<company-or-_unknown>/<timestamp>/` — the run failed; it contains only `error_report.json` describing what went wrong
+
+Successful runs never write into these directories.
+
+## Automatic Extraction
+
+Given a recruitment URL, Job Extractor observes how the page loads its job list, identifies the job list API behind it, builds a collection plan, and pages through the full list. Job details are then fetched and cleaned into structured records with completeness flags, so you can see exactly how much of each JD was captured. Job descriptions are never fabricated — only what the source site provides is recorded.
+
+## Browser Fallback
+
+Some sites render their job list only in the browser. When plain HTTP collection is not enough, Job Extractor retries the page with a headless Chromium and reads the rendered result.
+
+## Manual cURL Fallback
+
+Some websites cannot be auto-discovered at all (request signatures, encrypted parameters, strict protection). In that case, copy the job-list request from your browser's developer tools as cURL and pass it to the program with `--list-curl` / `--detail-curl` (or the `--list-curl-file` / `--detail-curl-file` variants). The cURL is parsed but never shell-executed.
+
+Detailed guide: [docs/MANUAL_CURL.md](docs/MANUAL_CURL.md) *(coming soon)*
+
+## Documentation
+
+- [User Guide](docs/USER_GUIDE.md) *(coming soon)*
+- [Manual cURL Guide](docs/MANUAL_CURL.md) *(coming soon)*
+- [Troubleshooting](docs/TROUBLESHOOTING.md) *(coming soon)*
+- [Architecture](docs/ARCHITECTURE.md) *(coming soon)*
+
+## Project Structure
+
+```
+job_extractor/     # core package
+tests/             # test suite
+scripts/           # benchmark utilities
+docs/              # documentation
+examples/          # usage examples
+output/            # run results (generated at runtime)
+main.py            # CLI entry point
+```
+
+## Limitations
+
+- No guarantee for every recruitment website — site structures vary and change
+- A redesigned page can break extraction until the tool is updated
+- Some sites require the browser fallback or manual cURL fallback
+- The project does **not** bypass login, CAPTCHAs, or other access controls
+- Rate limits and the terms of the target website still apply
+
+## Security
+
+Never share or commit cookies, tokens, `Authorization` headers, or cURL commands that contain authentication information. See [SECURITY.md](SECURITY.md) *(to be added)*.
+
+## Disclaimer
+
+This project is intended for personal study, research, and data organization of publicly available recruitment information. You are responsible for complying with the target website's terms of service, robots policy, access frequency limits, and applicable laws. The project is not designed to bypass login, CAPTCHAs, or other access controls.
+
+## License
+
+License information will be added before the public release.
