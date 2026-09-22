@@ -103,6 +103,8 @@ python main.py --list-curl "<curl>" --detail-curl "<curl>"   # 手动 cURL 兜�
 
 无需设置 `PYTHONPATH` 或其他环境变量——在仓库根目录直接运行即可。
 
+> 如果某个网站自动抓取失败，程序会先用无头浏览器重试；仍拿不到数据时，可以从浏览器复制 cURL 请求交给程序处理——见[手动 cURL 兜底](#手动-curl-兜底)。
+
 ## 输出
 
 每次成功运行会创建一个带时间戳的目录：
@@ -179,7 +181,6 @@ Manual cURL fallback（手动 cURL 兜底）
 - [故障排查](docs/TROUBLESHOOTING.md)
 - [更新日志](CHANGELOG.md)
 - [参与贡献](CONTRIBUTING.md)
-- [架构说明](docs/ARCHITECTURE.md)（待完成）
 
 ## 项目结构
 

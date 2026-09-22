@@ -103,6 +103,8 @@ python main.py --list-curl "<curl>" --detail-curl "<curl>"   # manual cURL fallb
 
 No `PYTHONPATH` or other environment setup is required — run it from the repository root.
 
+> If a site fails to extract automatically, Job Extractor retries it with a headless browser — and, as a last resort, accepts a cURL request copied from your browser. See [Manual cURL Fallback](#manual-curl-fallback).
+
 ## Output
 
 Each successful run creates a timestamped directory:
@@ -179,7 +181,6 @@ You can inspect the [example output](examples/example_output/) before running th
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
-- [Architecture](docs/ARCHITECTURE.md) *(coming soon)*
 
 ## Project Structure
 
