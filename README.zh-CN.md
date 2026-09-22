@@ -141,9 +141,32 @@ output/
 
 ## 手动 cURL 兜底
 
-有些网站完全无法自动发现（请求签名、加密参数、严格防护）。此时可以从浏览器开发者工具把岗位列表请求复制为 cURL，通过 `--list-curl` / `--detail-curl`（或 `--list-curl-file` / `--detail-curl-file`）交给程序继续采集。cURL 只被解析，绝不会被执行为 shell 命令。
+Job Extractor 按三层顺序尝试：
+
+```
+自动模式
+      ↓  网站无法自动发现时
+Browser fallback（浏览器兜底）
+      ↓  浏览器渲染后仍拿不到数据时
+Manual cURL fallback（手动 cURL 兜底）
+```
+
+手动 cURL 是最后的兜底方式，适用于：
+
+- 网站自动抓取失败
+- Browser fallback 仍无法取得数据
+- 网站通过前端 API / XHR 请求加载岗位
+
+涉及两种 cURL：
+
+- **List cURL**：岗位列表请求，返回职位名称、岗位 ID、分页信息等
+- **Detail cURL**：单个岗位的详情请求，返回完整 JD / 岗位描述
+
+从浏览器开发者工具把请求复制为 cURL，通过 `--list-curl` / `--detail-curl`（或 `--list-curl-file` / `--detail-curl-file`）交给程序继续采集。cURL 只被解析，绝不会被执行为 shell 命令。
 
 详细教程：[docs/MANUAL_CURL.md](docs/MANUAL_CURL.md)
+
+> **安全提醒**：浏览器复制出的 cURL 可能包含 Cookie、Token、`Authorization`、Session 信息。不要直接把原始 cURL 上传到 GitHub、Issue、日志或公开聊天中；使用前应先检查并删除敏感认证信息。
 
 ## 示例输出
 

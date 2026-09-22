@@ -141,9 +141,32 @@ Some sites render their job list only in the browser. When plain HTTP collection
 
 ## Manual cURL Fallback
 
-Some websites cannot be auto-discovered at all (request signatures, encrypted parameters, strict protection). In that case, copy the job-list request from your browser's developer tools as cURL and pass it to the program with `--list-curl` / `--detail-curl` (or the `--list-curl-file` / `--detail-curl-file` variants). The cURL is parsed but never shell-executed.
+Job Extractor works in three layers, tried in order:
+
+```
+Automatic extraction
+      ↓  if the site cannot be auto-discovered
+Browser fallback
+      ↓  if rendered pages still yield no data
+Manual cURL fallback
+```
+
+Manual cURL is the last resort. Use it when:
+
+- automatic extraction fails on the website
+- the browser fallback still cannot obtain data
+- the site loads its job list through front-end API / XHR requests
+
+Two kinds of cURL are involved:
+
+- **List cURL** — the request that returns the job list (job titles, IDs, pagination)
+- **Detail cURL** — the request that returns one job's full details (the complete JD / job description)
+
+Copy the requests from your browser's developer tools as cURL and pass them to the program with `--list-curl` / `--detail-curl` (or the `--list-curl-file` / `--detail-curl-file` variants). The cURL is parsed but never shell-executed.
 
 Detailed guide: [docs/MANUAL_CURL.md](docs/MANUAL_CURL.md)
+
+> **Security warning:** copied cURL commands may contain `Cookie` headers, `Authorization` headers, tokens and session information. Never publish or share raw cURL commands without reviewing and removing sensitive information first.
 
 ## Example Output
 
