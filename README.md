@@ -60,6 +60,9 @@ Other websites go through the **generic engine**, which auto-discovers the job l
 
 ## Installation
 
+> **Python 3.10 or newer is required.** Check with `python3 --version`.
+> If your system `python3` is older than 3.10, install Python 3.10+ first.
+
 macOS / Linux:
 
 ```bash

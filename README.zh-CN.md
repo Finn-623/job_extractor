@@ -60,6 +60,9 @@ Job Extractor 负责提取和结构化，AI 负责推荐和分析：
 
 ## 安装
 
+> **需要 Python 3.10 或更高版本。** 先运行 `python3 --version` 确认。
+> 如果系统 Python 低于 3.10，请先安装 Python 3.10+。
+
 macOS / Linux：
 
 ```bash
