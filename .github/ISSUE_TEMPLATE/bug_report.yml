@@ -1,0 +1,109 @@
+name: Bug report
+description: Report a reproducible problem with Job Extractor.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem.
+        Please fill in the sections below — the more precise the steps, the faster it can be fixed.
+
+        > **Security reminder:** do **NOT** include cookies, access tokens, `Authorization` headers, login credentials, private recruitment account data, or personal applicant information anywhere in this issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: A short summary of what went wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps that reliably trigger the problem. Include the exact command you ran.
+      placeholder: |
+        1. Run `python main.py "..."` with ...
+        2. See the error
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Recruitment website / platform
+      description: What kind of site were you extracting from?
+      options:
+        - Zhiye
+        - Moka
+        - Feishu / Lark
+        - Beisen CMS
+        - Other (please describe below)
+        - Generic website
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: Recruitment URL
+      description: The page you ran Job Extractor on. Remove any private query parameters, tokens or session identifiers before posting.
+      placeholder: https://example-company.example/jobs
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include whether the run failed, produced incomplete output, or wrote to output/_failed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error message / logs
+      description: |
+        Paste only relevant terminal output.
+
+        Remove before pasting:
+        - cookies
+        - tokens
+        - Authorization headers
+        - personal data
+
+        If a cURL example would help, provide a sanitized request example only. Never share raw cURL containing authentication data.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Basic information about your setup.
+      placeholder: |
+        - OS: e.g. macOS 14 / Windows 11
+        - Python version: e.g. 3.12 (from `python3 --version`)
+        - Job Extractor version / commit: e.g. v1.1.0, or the commit hash from `git log -1`
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might help (optional).
+    validations:
+      required: false

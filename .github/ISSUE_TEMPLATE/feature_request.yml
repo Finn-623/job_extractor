@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest an improvement or new capability for Job Extractor.
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion.
+        Keep it focused on the problem you are trying to solve — this helps evaluate the idea.
+
+        > **Security reminder:** do **NOT** include cookies, tokens, `Authorization` headers, or private account data in this issue.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to do, and what is blocking you today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed improvement
+      description: What would you like Job Extractor to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Example
+      description: |
+        If this involves a new recruitment website, please provide:
+        - the public recruitment URL
+        - the platform name (if known)
+        - the data you expect to extract (e.g. job list, full JD, headcount)
+
+        Never share cookies, tokens, Authorization headers or private account data.
+    validations:
+      required: false
+
+  - type: textarea
+    id: usefulness
+    attributes:
+      label: Why this is useful
+      description: Who benefits from this and how? A short answer is enough.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, related issues, or anything else (optional).
+    validations:
+      required: false
