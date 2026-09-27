@@ -96,7 +96,7 @@ body:
       placeholder: |
         - OS: e.g. macOS 14 / Windows 11
         - Python version: e.g. 3.12 (from `python3 --version`)
-        - Job Extractor version / commit: e.g. v1.1.0, or the commit hash from `git log -1`
+        - Job Extractor version / commit: e.g. v2.0.0, or the commit hash from `git log -1`
     validations:
       required: true
 

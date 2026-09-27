@@ -10,7 +10,7 @@ runner = CliRunner()
 def test_version_returns_zero():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.output
+    assert "2.0.0" in result.output
 
 def test_zhiye_detection(monkeypatch, tmp_path):
     monkeypatch.setattr("job_extractor.adapters.beisen_cms.BeisenCMSCollector.probe", classmethod(lambda cls, url: False))

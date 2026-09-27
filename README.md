@@ -2,7 +2,9 @@
 
 **English** | [中文文档](README.zh-CN.md)
 
-Extract job listings and full job descriptions from recruitment websites into structured files for AI-assisted job recommendation, filtering and analysis.
+Give Job Extractor a public recruitment URL. It identifies the platform or data
+source, extracts job listings and complete job descriptions, and exports
+structured results for review, filtering, and analysis.
 
 输入招聘网站 URL，自动提取岗位列表和完整 JD，并生成可直接交给 GPT 等 AI 使用的结构化文件，用于岗位推荐、筛选和分析。
 
@@ -32,6 +34,8 @@ You no longer read jobs one by one. Extract once, then let AI do the reading.
 - **Full JD extraction** — fetches complete job descriptions (responsibilities / requirements), not just titles
 - **Multi-platform support** — dedicated adapters for several recruitment platforms, plus a generic engine for unknown sites
 - **Deduplication** — repeated postings across pages are merged and audited
+- **Multi-scope collection** — explicit campus, social, and specialist scopes are collected before a site-level merge
+- **Company-aware output** — hosted group sites retain the portal owner and each posting's own legal-entity employer
 - **Browser fallback** — JavaScript-rendered sites fall back to a headless browser automatically
 - **Manual cURL fallback** — protected sites accept a cURL request copied from your browser
 - **Multiple export formats** — JSON, CSV, XLSX and a Markdown report per run
@@ -49,14 +53,18 @@ Job Extractor handles extraction and structuring. The AI handles recommendation 
 
 ## Supported Platforms
 
-Verified recruitment platforms:
+| Platform | Status | Collection mode | Notes |
+| --- | --- | --- | --- |
+| Moka | Supported | Dedicated adapter | Includes `campus_apply` routes. |
+| Feishu / Lark | Supported | Dedicated adapter | Uses the public recruitment flow. |
+| Zhiye | Supported | Dedicated adapter | Supports legacy `*.zhiye.com` career sites. |
+| Beisen CmsPortal | Supported | Fingerprinted adapter | Routed only after a CmsPortal fingerprint check. |
+| Other public career sites | Experimental | Generic discovery | Best-effort API/browser discovery; not guaranteed for every site. |
 
-- **Moka** — Moka-powered career sites
-- **Feishu / Lark** recruitment sites
-- **Zhiye** — `*.zhiye.com` career sites
-- **Beisen CMS** — Beisen-powered career sites
-
-Other websites go through the **generic engine**, which auto-discovers the job list API and falls back to a headless browser when needed. Generic success depends on the site — treat it as experimental rather than guaranteed. Job Extractor does not promise support for every recruitment website.
+The generic engine can discover explicit recruitment scopes (for example,
+campus, social, or specialist hiring), collect each scope, and merge duplicate
+stable IDs across scopes. It preserves scope provenance and reports merge
+metrics in `collection.json`.
 
 ## Installation
 
@@ -101,6 +109,16 @@ python main.py "URL" --discover         # observe and report probable job APIs o
 python main.py --list-curl "<curl>" --detail-curl "<curl>"   # manual cURL fallback
 ```
 
+Platform URL examples (replace the sample tenant values with a public career
+page you are entitled to access):
+
+```bash
+python main.py "https://app.mokahr.com/campus-recruitment/acme/123"
+python main.py "https://app.mokahr.com/campus_apply/acme/123"
+python main.py "https://example.zhiye.com/campus/jobs"
+python main.py "https://careers.example.com/jobs"
+```
+
 No `PYTHONPATH` or other environment setup is required — run it from the repository root.
 
 > If a site fails to extract automatically, Job Extractor retries it with a headless browser — and, as a last resort, accepts a cURL request copied from your browser. See [Manual cURL Fallback](#manual-curl-fallback).
@@ -136,6 +154,18 @@ Successful runs never write into these directories.
 ## Automatic Extraction
 
 Given a recruitment URL, Job Extractor observes how the page loads its job list, identifies the job list API behind it, builds a collection plan, and pages through the full list. Job details are then fetched and cleaned into structured records with completeness flags, so you can see exactly how much of each JD was captured. Job descriptions are never fabricated — only what the source site provides is recorded.
+
+## Debugging
+
+Normal runs keep internal discovery diagnostics silent. To diagnose a single
+public run, enable the redacted trace gate:
+
+```bash
+JOB_EXTRACTOR_TRACE=1 python main.py "https://example.com/jobs"
+```
+
+Review trace output before sharing it. See [Troubleshooting](docs/TROUBLESHOOTING.md)
+for installation, output, and extraction issues.
 
 ## Browser Fallback
 
@@ -177,6 +207,7 @@ You can inspect the [example output](examples/example_output/) before running th
 ## Documentation
 
 - [User Guide](docs/USER_GUIDE.md)
+- [Usage Guide](docs/USAGE.md)
 - [Manual cURL Guide](docs/MANUAL_CURL.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Changelog](CHANGELOG.md)
@@ -213,3 +244,8 @@ This project is intended for personal study, research, and data organization of 
 ## License
 
 Released under the [MIT License](LICENSE).
+
+## Feedback
+
+Report reproducible bugs or request support for a new public recruitment
+platform through the repository's [issue templates](https://github.com/Finn-623/job_extractor/issues/new/choose). Never include cookies, tokens, account details, or unsanitized cURL commands.
