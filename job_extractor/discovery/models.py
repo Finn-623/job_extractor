@@ -29,6 +29,10 @@ class ApiCandidate(BaseModel):
     job_entity_density: float = 0.0
     rejection_reasons: list[str] = Field(default_factory=list)
     observed_company_count: int = 0
+    # Distinct job-level employer names sampled from the same records that
+    # produced observed_company_count (bounded); corroboration evidence for
+    # hosted-site identity resolution.
+    observed_company_names: list[str] = Field(default_factory=list)
     list_item_path: str|None = None
     replayable: bool = True
     graphql_operation: str|None = None
@@ -376,6 +380,8 @@ class DiscoveryResult(BaseModel):
     dom_fallback: dict[str,Any] = Field(default_factory=dict)
     detail_dom: dict[str,Any] = Field(default_factory=dict)
     company: str|None = None
+    # Site-level identity evidence (hosted multi-company portals only).
+    site_company_evidence: list[str] = Field(default_factory=list)
     tool_version: str = ""
     warnings: list[str] = Field(default_factory=list)
     source_inventory: list[CandidateSource] = Field(default_factory=list)

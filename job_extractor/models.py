@@ -54,8 +54,15 @@ class CollectionMetrics(BaseModel):
     pages_requested: int = 0
     pages_succeeded: int = 0
     raw_rows: int = 0
+    # `unique_jobs` is the pre-cross-scope count: it is accumulated by each
+    # collector's pagination stage and intentionally excludes the final
+    # multi-scope stable-ID merge.
     unique_jobs: int = 0
+    # Rows deduplicated inside an individual collector's pagination stream.
     duplicate_jobs: int = 0
+    # Additional rows collapsed only when otherwise-complete ListScopes are
+    # reconciled by a shared stable job identity.
+    cross_scope_merged_rows: int = 0
     retry_count: int = 0
     retry_sleep_seconds: float = 0.0
     list_request_seconds: float = 0.0
@@ -97,8 +104,13 @@ class Job(BaseModel):
     department: str | None = None
     locations: list[str] = Field(default_factory=list)
     recruitment_type: str | None = None
+    # Recruitment entrances/tabs are provenance, distinct from the job
+    # record's own recruitment_type attribute.
+    recruitment_scopes: list[str] = Field(default_factory=list)
     education: str | None = None
-    major: str | None = None
+    # Existing adapters historically emit a string; Generic API records can
+    # expose several readable majors, which must remain a list.
+    major: list[str] | str | None = None
     headcount: int | None = None
     responsibilities: list[str] = Field(default_factory=list)
     requirements: list[str] = Field(default_factory=list)
@@ -142,6 +154,10 @@ class Job(BaseModel):
         if self.locations:
             self.locations = [  # type: ignore[list-item]
                 Job._drop_lone_surrogates(x) for x in self.locations
+            ]
+        if self.recruitment_scopes:
+            self.recruitment_scopes = [  # type: ignore[list-item]
+                Job._drop_lone_surrogates(x) for x in self.recruitment_scopes
             ]
         self.responsibilities = [  # type: ignore[list-item]
             Job._drop_lone_surrogates(x) for x in self.responsibilities

@@ -77,7 +77,7 @@ def _finalize_stages(result,adapter_name,reporter,cli_started=None) -> None:
         files=sorted(p.name for p in Path(out_dir).iterdir() if p.is_file()) if out_dir and Path(out_dir).exists() else []
         reporter.success_summary(result,reporter.artifacts,files)
 
-def _run_stages(url,collect_fn,adapter_name,reporter,discovery_done=False,cli_started=None) -> str|None:
+def _run_stages(url,collect_fn,adapter_name,reporter,discovery_done=False,scope_count=None,cli_started=None) -> str|None:
     """STEP92: observation-only stages [1/5]-[4/5] around a collection call.
 
     The collector internals are untouched; stage facts are derived from the
@@ -87,7 +87,8 @@ def _run_stages(url,collect_fn,adapter_name,reporter,discovery_done=False,cli_st
         # Stage 1 was started/closed by the caller around discovery; still
         # surface the recognized-source fact on the board suffix and in the
         # non-TTY log (STEP96).
-        reporter.stage_summary(1,"已识别岗位数据源")
+        discovery_note=(f"{scope_count} 个招聘范围" if scope_count and scope_count > 1 else "已识别岗位数据源")
+        reporter.stage_summary(1,discovery_note)
     else:
         reporter.stage(1)  # 识别招聘网站：adapter detect / discovery resolved here
         reporter.note(1,"已识别岗位数据源")
@@ -108,16 +109,17 @@ def _run_stages(url,collect_fn,adapter_name,reporter,discovery_done=False,cli_st
         result.metrics.total_elapsed_seconds=perf_counter()-cli_started
     reporter.set_company(result.company)  # spec A: 公司 line once company is known
     unique=result.total_unique or len(result.jobs)
-    expected=result.total_expected if result.total_expected is not None else unique
-    reporter.note(2,f"{result.total_fetched} / {expected} 个岗位")
+    raw_rows=getattr(result.metrics,"raw_rows",0) or 0
+    reporter.note(2,f"{raw_rows} 条原始记录")
     if result.status=="FAILED":  # mark the actual failing stage; skip 3/4 detail stages
         stage,code=_failure_stage(result)
         reporter.stage_fail(stage,code)
         reporter.failed_summary(stage,code)
         return None
-    reporter.stage(3)  # 处理岗位数据：dedupe/normalize applied inside the collector
+    reporter.stage(3)  # Collector has completed; this stage presents its final reconciliation.
     dupes=getattr(result.metrics,"duplicate_jobs",0) or 0
-    reporter.note(3,f"{unique} 个唯一岗位" + (f"\n重复：{dupes}" if dupes else ""))
+    cross_scope_merged=getattr(result.metrics,"cross_scope_merged_rows",0) or 0
+    reporter.note(3,f"{unique} 个唯一岗位\n单范围重复：{dupes} · 跨范围合并：{cross_scope_merged}")
     reporter.stage(4)
     metrics=result.metrics
     if result.status!="FAILED":
@@ -455,10 +457,10 @@ def main(
                 typer.echo(f"Runtime pagination: model={source.get('pagination_model')} total={source.get('total')} limit={source.get('limit')} pages={source.get('page_count')}")
                 collected=execute_plan_or_report(generic,runtime_plan)
                 if collected is None:return
-                reporter.close_current()
                 text=_run_stages(url,lambda:(generic,collected),generic.__class__.__name__,reporter,discovery_done=True,cli_started=cli_started)
                 if text:typer.echo(text)
                 return
+        reporter.discovery_scope_progress()
         try:
             navigation,stability=stable_navigation(url,generic.discover,default_registry,scope,initial_result=result,deadline_seconds=75)
         except Exception as exc:  # STEP76A2: navigation must surface a terminal result — never a silent exit.
@@ -467,7 +469,6 @@ def main(
         handoff=navigation.handoff;result=navigation.terminal_result
         output_path=DISCOVERY_OUTPUT_DIR/filename;output_path.write_text(result.model_dump_json(indent=2),encoding="utf-8")
         if handoff:
-            reporter.close_current()
             text=_run_stages(handoff.url,lambda:collect_url(handoff.url,default_registry.detect_known(handoff.url)),handoff.adapter_name,reporter,discovery_done=True,cli_started=cli_started)
             if text:typer.echo(text)
             return
@@ -476,8 +477,8 @@ def main(
             _interactive_curl_fallback(url,reporter,auto_code="DISCOVERY_FAILED");return
         collection_plan=generic.build_plan(result);validation=CollectionPlanValidator().validate(collection_plan)
         if can_auto_execute_generic(collection_plan,validation,navigation,result):
-            reporter.close_current()
-            text=_run_stages(url,lambda:(generic,execute_plan_or_report(generic,collection_plan)),generic.__class__.__name__,reporter,discovery_done=True,cli_started=cli_started)
+            scope_count=len(collection_plan.list_scopes) or None
+            text=_run_stages(url,lambda:(generic,execute_plan_or_report(generic,collection_plan)),generic.__class__.__name__,reporter,discovery_done=True,scope_count=scope_count,cli_started=cli_started)
             if text:typer.echo(text)
             return
         reason="TIMEOUT" if result.status=="TIMEOUT" else "UNSUPPORTED" if collection_plan.mode=="UNSUPPORTED" else "DISCOVERY_FAILED"

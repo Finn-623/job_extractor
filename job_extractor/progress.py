@@ -13,7 +13,9 @@ import time
 import unicodedata
 from typing import Any, Callable
 
-STAGES = ["识别招聘网站", "获取岗位列表", "处理岗位数据", "获取完整 JD", "保存结果"]
+from job_extractor.debug_trace import set_sink as set_debug_trace_sink
+
+STAGES = ["识别网站与招聘范围", "获取岗位数据", "整理与去重", "完善岗位 JD", "保存结果"]
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧"
 SLOW_HINT_15 = "网站响应较慢，仍在处理中..."
 SLOW_HINT_30 = "仍在等待网站响应..."
@@ -87,7 +89,7 @@ def _display_width(text: str) -> int:
     return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
 
 
-def pad_stage_name(name: str, width: int = 14) -> str:
+def pad_stage_name(name: str, width: int = 18) -> str:
     return name + " " * max(0, width - _display_width(name))
 
 
@@ -126,6 +128,10 @@ class ProgressReporter:
         self.errors: list[dict[str, Any]] = []
         self.artifacts: Any | None = None  # set by cli after reports (run dir + files)
         self._t0: float | None = None
+        # Internal diagnostics (SCOPE_TRACE/TIMING_TRACE...) render through this
+        # reporter in trace mode so they can pause the board instead of being
+        # clobbered by an in-place frame refresh (default runs never emit them).
+        set_debug_trace_sink(self._trace_sink)
 
     # -- lifecycle ---------------------------------------------------------
     def begin(self, source_url: str | None = None, company: str | None = None) -> None:
@@ -199,6 +205,17 @@ class ProgressReporter:
         # header is permanent one-time text and never re-rendered here.
         self._render_dynamic(self._live_lines())
 
+    def _trace_sink(self, line: str) -> None:
+        """Print one internal diagnostic as a permanent line without leaving
+        stale frame bytes: the active board is wiped first, the diagnostic is
+        emitted below the retained checklist, then the live area re-renders."""
+        self.stop_heartbeat()
+        keep = ""
+        if self._tty and self._dyn_height:
+            keep = "\n"  # retain the final board rows on screen
+            self._dyn_height = 0
+        self._out(keep + line)
+
     # -- stages ------------------------------------------------------------
     def stage(self, n: int) -> None:
         """Start stage n (1-based); auto-completes the previously open stage."""
@@ -206,9 +223,11 @@ class ProgressReporter:
         self.current = n
         self.states[n - 1] = "active"
         self.stage_started[n - 1] = self._clock()
+        activity={1:"正在识别招聘网站与数据源...",2:"正在获取岗位数据...",
+                  3:"正在整理与去重...",4:"正在完善岗位 JD...",5:"正在保存结果..."}[n]
         self._live = {"got": 0, "page": None, "page_total": None, "done": None,
                       "total": None, "ok": 0, "fail": 0, "title": None, "counts": False,
-                      "activity": "正在识别招聘网站与数据源..." if n == 1 else "正在获取岗位数据..."}
+                      "activity": activity}
         self._err_flash = False
         if self._tty:
             self._start_heartbeat()
@@ -249,7 +268,7 @@ class ProgressReporter:
         self.current = None
         self.states[n - 1] = "done"
         if not self._tty:
-            self._emit(f"[{n}/5] {pad_stage_name(STAGES[n - 1])} ✓ {self.stage_elapsed[n - 1]:.1f}s")
+            self._emit(f"✓ [{n}/5] {pad_stage_name(STAGES[n - 1])} {self.stage_elapsed[n - 1]:.1f}s")
             note=self._stage_note.get(n)
             if note:
                 for line in note.split("\n"):self._emit(f"      {line}")
@@ -258,12 +277,16 @@ class ProgressReporter:
     def note(self, n: int, text: str) -> None:
         self._stage_note[n] = text
 
+    def discovery_scope_progress(self) -> None:
+        """Keep recruitment-range work within stage 1's live area."""
+        if self.current == 1:
+            self._live["activity"] = "正在识别招聘范围..."
+            if self._tty:
+                self._refresh()
+
     def stage_summary(self, n: int, text: str) -> None:
-        """STEP96: a stage fact shown as the ✓ suffix on the board and echoed
-        once as a permanent line on non-TTY runs."""
+        """Attach a stage fact to its completed line; never emit a duplicate."""
         self.note(n, text)
-        if not self._tty:
-            self._emit(f"[{n}/5] {STAGES[n - 1]}：{text}")
 
     def save_line(self, name: str) -> None:
         """Spec N: stage-5 per-file progress lines."""
@@ -278,12 +301,16 @@ class ProgressReporter:
         # STEP96.1: the 公司/来源 header is permanent one-time text (see begin /
         # set_company) and is NOT part of the dynamic frame anymore, so every
         # heartbeat/refresh rewrites only stage/progress rows — never the header.
-        lines: list[str] = ["流程进度"]
+        lines: list[str] = []
         for index,name in enumerate(STAGES,1):
             state=self.states[index-1]; mark={"done":"✓","active":"▶","failed":"✗","pending":"○"}[state]
-            suffix=(f"{self.stage_elapsed[index-1]:.1f}s" + (f" · {self._stage_note[index]}" if index in self._stage_note else "") if state=="done" and self.stage_elapsed[index-1] is not None
-                    else f"进行中 · {fmt_clock(elapsed)}" if state=="active" else self._stage_note.get(index, "等待中" if state=="pending" else "失败"))
+            note_lines=self._stage_note.get(index, "").splitlines()
+            primary_note=note_lines[0] if note_lines else ""
+            suffix=(f"{self.stage_elapsed[index-1]:.1f}s" + (f" · {primary_note}" if primary_note else "") if state=="done" and self.stage_elapsed[index-1] is not None
+                    else f"进行中 · {fmt_clock(elapsed)}" if state=="active" else primary_note or ("等待中" if state=="pending" else "失败"))
             lines.append(f"{mark} [{index}/5] {pad_stage_name(name)} {suffix}")
+            if state == "done":
+                lines.extend(f"      {detail}" for detail in note_lines[1:])
         # Once all stages are terminal, the final board deliberately has no
         # spinner/progress/ETA area underneath it.
         if self.terminal or (self.current is None and all(state in {"done","failed"} for state in self.states)):
@@ -355,7 +382,7 @@ class ProgressReporter:
         self._live.update(got=done, done=done, total=total, ok=ok, fail=fail,
                           title=title, counts=True)
         self._err_flash = False
-        self._stage_note[4] = f"成功 {ok} / 失败 {fail}"
+        self._stage_note[4] = f"完整：{ok} · 失败：{fail}"
         if not self._tty:
             pct = (done / total * 100) if total else 0.0
             self._emit(f"[{progress_bar(done, total)}] {done}/{total}  {pct:.1f}%")
@@ -383,7 +410,7 @@ class ProgressReporter:
         self._end_dynamic()
         if elapsed is not None:
             self.stage_elapsed[3] = elapsed
-        self._stage_note[4] = f"列表已包含完整 JD · {total} / {total}\n成功 {total} / 失败 0"
+        self._stage_note[4] = f"列表已包含完整 JD\n完整：{total} · 失败：0"
 
     # -- errors ------------------------------------------------------------
     def error(self, *, job_id: str | None = None, title: str | None = None,
@@ -412,7 +439,9 @@ class ProgressReporter:
             directory=getattr(artifacts,"output_directory",None)
             if directory and os.path.isdir(directory):actual={item for item in os.listdir(directory) if os.path.isfile(os.path.join(directory,item))}
         files=[name for name in preferred if name in actual]
+        raw_rows = getattr(m, "raw_rows", 0) or 0
         dupes = getattr(m, "duplicate_jobs", 0) or 0
+        cross_scope_merged = getattr(m, "cross_scope_merged_rows", 0) or 0
         total = result.total_unique or len(result.jobs)  # collectors always set it; fixtures may not
         out_dir = str(getattr(artifacts, "output_directory", "") or "")
         display = out_dir
@@ -429,7 +458,11 @@ class ProgressReporter:
         self._emit(f"岗位数：{total}")
         self._emit(f"总耗时：{fmt_clock(self.total_elapsed(), tenths=True)}")
         self._emit(f"采集耗时：{fmt_clock(getattr(m, 'collection_elapsed_seconds', None) or m.elapsed_seconds, tenths=True)}")
-        self._emit(f"JD 成功：{m.details_succeeded if m.details_succeeded else total}")
+        self._emit(f"原始记录：{raw_rows}")
+        self._emit(f"唯一岗位：{total}")
+        self._emit(f"单范围重复：{dupes}")
+        self._emit(f"跨范围合并：{cross_scope_merged}")
+        self._emit(f"JD 完整：{m.details_succeeded if m.details_succeeded else total}")
         self._emit(f"JD 失败：{m.details_failed or 0}")
         audit = getattr(result, "enrichment", {}).get("detail_resolution") or {}
         if audit.get("detail_method") == "AUTO_API":
@@ -437,7 +470,6 @@ class ProgressReporter:
         if audit.get("detail_method") == "LIST_ONLY" or m.jd_strategy == "LIST_ONLY":
             self._emit(f"List-only：{audit.get('jd_missing', total)}")
             self._emit("部分岗位未获取完整 JD，已保存岗位列表")
-        self._emit(f"重复岗位：{dupes}")
         if getattr(result, "enrichment", {}).get("fallback", {}).get("fallback_method") == "curl":
             self._emit("数据获取方式：cURL 兜底")
         self._emit("")
@@ -483,14 +515,16 @@ class ProgressReporter:
         with self._io_lock:
             parts: list[str] = []
             if self._dyn_height:
-                # The cursor is left on the final rendered line (there is no
-                # trailing newline), so the first line is only height - 1
-                # rows above it.  Moving up the full height starts one row
-                # too early and leaves the previous footer/ETA behind.
+                # The previous frame ended without a newline, so its cursor
+                # sits at the END of the last rendered row: the start of the
+                # block is exactly (height - 1) rows above, one column right.
+                # Returning the cursor to the block start (column 1) is what
+                # lets the repaint below overwrite every old row in place.
                 if self._dyn_height > 1:
                     parts.append(f"\x1b[{self._dyn_height - 1}A")
+                parts.append("\r")
             for index, line in enumerate(lines):
-                parts.append(f"\r\x1b[2K{line}")
+                parts.append(f"\x1b[2K{line}")
                 if index < len(lines) - 1:
                     parts.append("\n")
             if self._dyn_height > len(lines):
@@ -503,8 +537,10 @@ class ProgressReporter:
             return
         if self._tty:
             with self._io_lock:
-                up=max(0,self._dyn_height-1)
-                self._write((f"\x1b[{up}A" if up else "")+"\r\x1b[J")
+                # Same geometry as _render_dynamic: end of the last row ->
+                # block start (height-1 rows up + column 1) before wiping.
+                up = max(0, self._dyn_height - 1)
+                self._write((f"\x1b[{up}A\r\x1b[J" if up else "\r\x1b[J"))
         self._dyn_height = 0
 
     def _emit(self, text: str) -> None:

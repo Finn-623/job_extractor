@@ -25,7 +25,7 @@ def test_zhiye_detection(monkeypatch, tmp_path):
         self.details_failed = 0
         self.detail_strategy = "LIST_SUFFICIENT"
         self.elapsed_seconds = 1.0
-        m = CollectionMetrics(jd_strategy="LIST_SUFFICIENT", list_requests=1,
+        m = CollectionMetrics(jd_strategy="LIST_SUFFICIENT", list_requests=1, raw_rows=1,
                               details_succeeded=0, details_failed=0, elapsed_seconds=1.0)
         return CollectionResult(source_url=url, platform="zhiye", company="Test",
                                 status="COMPLETE", total_expected=1, total_fetched=1,
@@ -42,7 +42,7 @@ def test_zhiye_detection(monkeypatch, tmp_path):
     result = runner.invoke(app, ["https://leapmotor1.zhiye.com/campus/jobs"])
     assert called["value"] is True  # proven: the known-adapter path used the stub
     assert result.exit_code == 0
-    assert "[1/5] 识别招聘网站" in result.output and "[5/5] 保存结果" in result.output
+    assert "[1/5] 识别网站与招聘范围" in result.output and "[5/5] 保存结果" in result.output
     assert "正在保存：jobs.json" in result.output
     assert "完成 ✓" in result.output and "✓" in result.output
     assert "抓取失败" not in result.output

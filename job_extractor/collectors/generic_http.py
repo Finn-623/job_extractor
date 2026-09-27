@@ -101,6 +101,39 @@ def text(value:Any)->str|None:
         for key in ("name","title","label","city","location"):
             if isinstance(value.get(key),str):return value[key]
     return None
+
+def _nonempty_text(value:Any)->str|None:
+    return value.strip() or None if isinstance(value,str) else None
+
+def _raw_company(raw:dict)->str|None:
+    direct=_nonempty_text(raw.get("company_name"))
+    if direct:return direct
+    info=raw.get("company_info")
+    if isinstance(info,dict):
+        return _nonempty_text(info.get("show_name")) or _nonempty_text(info.get("name"))
+    return None
+
+def _district_locations(raw:dict)->list[str]:
+    values=[]
+    for district in raw.get("district_list") if isinstance(raw.get("district_list"),list) else []:
+        if not isinstance(district,dict):continue
+        value=_nonempty_text(district.get("area_cn")) or _nonempty_text(district.get("address"))
+        if value and value not in values:values.append(value)
+    return values
+
+def _readable_list(value:Any)->list[str]:
+    items=value if isinstance(value,list) else [value]
+    values=[]
+    for item in items:
+        text_value=_nonempty_text(item)
+        if text_value and text_value not in values:values.append(text_value)
+    return values
+
+def _positive_headcount(value:Any)->int|None:
+    if isinstance(value,bool):return None
+    if isinstance(value,int) and value>0:return value
+    if isinstance(value,str) and value.strip().isdigit() and int(value.strip())>0:return int(value.strip())
+    return None
 def nested_text(value:Any,*paths:str)->str|None:
     for path in paths:
         current=value
@@ -182,6 +215,97 @@ class GenericHttpCollector:
         self.browser_timeout_ms=browser_timeout_ms
         self.recorder=MetricsRecorder();self.list_requests=self.page_count=self.details_attempted=self.details_succeeded=self.details_failed=0
         self.detail_strategy=plan.detail_mode;self.page_size=None;self.elapsed_seconds=0.0;self.scope=None
+
+    def _scope_plan(self,scope)->CollectionPlan:
+        """Materialize one observed scope as the existing single-list plan."""
+        initial_values=dict(scope.initial_values)
+        # Multi-scope PAGE APIs are independent HTTP replays.  A modestly
+        # larger page is materially cheaper than issuing the same request 5x
+        # as often, while the authoritative total below remains the
+        # completeness guard.  Some providers silently cap page_size; that
+        # is safe because the pagination loop continues while total is unmet.
+        if scope.pagination_type=="PAGE" and scope.page_size_param:
+            try:
+                current=int(initial_values.get(scope.page_size_param,0) or 0)
+            except (TypeError,ValueError):
+                current=0
+            if 0<current<100:
+                initial_values[scope.page_size_param]=100
+        return self.plan.model_copy(update={
+            "list_scopes":[], "list_endpoint":scope.endpoint, "list_method":scope.method,
+            "initial_values":initial_values, "query_values":dict(scope.query_values),
+            "pagination_type":scope.pagination_type, "page_param":scope.page_param,
+            "page_size_param":scope.page_size_param, "offset_param":scope.offset_param,
+            "cursor_param":scope.cursor_param, "next_cursor_field":scope.next_cursor_field,
+            "has_more_field":scope.has_more_field, "total_field":scope.total_field,
+            "observed_total":scope.official_total,
+            "scope":{**self.plan.scope,"recruitment_scope":scope.label,
+                     "recruitment_scope_identity":dict(scope.identity)},
+        })
+
+    def _collect_multi_scope(self)->CollectionResult:
+        """Collect every observed scope before making a site-level verdict."""
+        started=datetime.now();clock=self.clock();scope_results=[]
+        for scope in self.plan.list_scopes:
+            remaining=max(0.0,self.deadline_seconds-(self.clock()-clock))
+            child=GenericHttpCollector(self._scope_plan(scope),client=self.client,max_pages=self.max_pages,
+                max_retries=self.max_retries,retry_backoff_base=self.retry_backoff_base,
+                deadline_seconds=remaining,sleep_fn=self.sleep_fn,clock=self.clock,
+                browser_factory=self.browser_factory,max_browser_jobs=self.max_browser_jobs,
+                browser_timeout_ms=self.browser_timeout_ms)
+            scope_results.append((scope,child.collect()))
+        unique:dict[str,Job]={};errors=[];scope_progress=[];cross_scope_merged_rows=0
+        for scope,result in scope_results:
+            complete=result.status=="COMPLETE"
+            scope_progress.append({"label":scope.label,"identity":scope.identity,
+                "official_total":result.total_expected,"fetched":result.total_fetched,
+                "unique":result.total_unique,
+                "status":"SCOPE_COMPLETE" if complete else "SCOPE_INCOMPLETE"})
+            errors.extend(f"[{scope.label}] {error}" for error in result.errors)
+            for job in result.jobs:
+                key=job.job_id or hashlib.sha256(json.dumps(job.raw_data,sort_keys=True,default=str).encode()).hexdigest()
+                if key in unique:
+                    prior=unique[key]
+                    sources=list(prior.raw_data.get("_generic_source_scopes",[]))
+                    identity=job.raw_data.get("_identity",{})
+                    prior_identity=prior.raw_data.get("_identity",{})
+                    # Composite fingerprints are a last-resort identity, not a
+                    # stable source ID.  Preserve the existing merge behavior,
+                    # but only report a cross-scope merge for a real stable-ID
+                    # collision between distinct scope provenance.
+                    stable_sources={"REQUISITION_ID","JOB_POSTING_ID","STABLE_API_ID","STRUCTURED_DETAIL_ID","CANONICAL_URL_ID"}
+                    if (scope.label not in sources
+                            and identity.get("identity_source") in stable_sources
+                            and prior_identity.get("identity_source") in stable_sources):
+                        cross_scope_merged_rows+=1
+                    if scope.label not in sources:sources.append(scope.label)
+                    unique[key]=prior.model_copy(update={"raw_data":{**prior.raw_data,"_generic_source_scopes":sources},
+                                                        "recruitment_scopes":sources})
+                else:
+                    sources=[scope.label]
+                    unique[key]=job.model_copy(update={"raw_data":{**job.raw_data,"_generic_source_scopes":sources},
+                                                      "recruitment_scopes":sources})
+        all_complete=bool(scope_results) and all(result.status=="COMPLETE" for _,result in scope_results)
+        # There is no authoritative site-wide total when scopes overlap.  The
+        # post-merge unique count is the only safe site total; per-scope
+        # official totals stay in scope_progress for audit.
+        status="COMPLETE" if all_complete and not errors else ("FAILED" if not scope_results else "INCOMPLETE")
+        result=CollectionResult(source_url=self.plan.source_url,platform="generic",company=self.plan.company,
+            scope={**self.plan.scope,"completion":"SITE_COMPLETE" if status=="COMPLETE" else "SITE_INCOMPLETE"},
+            total_expected=len(unique) if status=="COMPLETE" else None,total_fetched=sum(r.total_fetched for _,r in scope_results),
+            total_unique=len(unique),status=status,jobs=list(unique.values()),errors=errors,
+            duplicate_audit={"scope_progress":scope_progress,"site_completion":"SITE_COMPLETE" if status=="COMPLETE" else "SITE_INCOMPLETE",
+                             "cross_scope_merged_rows":cross_scope_merged_rows},
+            started_at=started,finished_at=datetime.now())
+        if scope_results:
+            metrics=result.metrics
+            for name in ("list_requests","list_pages","pages_requested","pages_succeeded","raw_rows","unique_jobs","duplicate_jobs","retry_count","retry_sleep_seconds","list_request_seconds","detail_request_seconds"):
+                setattr(metrics,name,sum(getattr(r.metrics,name,0) or 0 for _,r in scope_results))
+            metrics.cross_scope_merged_rows=cross_scope_merged_rows
+            metrics.collection_mode=scope_results[0][1].metrics.collection_mode
+            metrics.termination_reason="SITE_COMPLETE" if status=="COMPLETE" else "SCOPE_INCOMPLETE"
+        result.data_completeness=evaluate_data_completeness(result)
+        return result
     def _request(self,values:dict[str,Any],query_values:dict[str,Any]|None=None):
         method=self.plan.list_method or "GET"
         if method=="GET":kwargs={"params":dict(values)}
@@ -227,6 +351,7 @@ class GenericHttpCollector:
         if isinstance(location,list):locations=[x for x in (text(y) for y in location) if x]
         elif isinstance(location,dict):locations=[x for x in (text(location),) if x]
         elif text(location):locations=[text(location)]
+        if not locations:locations=_district_locations(raw)
         # STEP 51: generic JD recognition. Field-name vocabularies live in
         # field_semantics; no site-specific branches here.
         recognized=pick_jd_fields(raw)
@@ -253,9 +378,17 @@ class GenericHttpCollector:
             detail=self.plan.detail_endpoint_template.replace("{id}",str(source_jid))
         department=text(pick(raw,("_generic_department","department","team")));identity=job_identity(raw,detail,title,locations,department,self.plan.company)
         category=nested_text(raw,"job_function.name","function.name") or text(pick(raw,("category","function","recruitCategoryName")))
-        recruitment=nested_text(raw,"recruit_type.parent.name","recruit_type.name") or self.plan.scope.get("recruitment_type")
-        return Job(company=self.plan.company,job_id=identity["identity_value"],job_title=title,locations=locations,department=department,
+        recruitment=(nested_text(raw,"recruit_type.parent.name","recruit_type.name") or self.plan.scope.get("recruitment_type")
+                     or _nonempty_text(raw.get("recruitment_type_cn")) or _nonempty_text(raw.get("nature_cn")))
+        # Job-level employer wins: on hosted group portals plan.company is the
+        # site owner, never a replacement for each posting's legal entity.
+        company=_raw_company(raw) or self.plan.company
+        education=_nonempty_text(raw.get("education_cn")) or _nonempty_text(raw.get("education"))
+        major=_readable_list(raw.get("major_cn")) or _readable_list(raw.get("major"))
+        scopes=_readable_list(raw.get("_generic_source_scopes"))
+        return Job(company=company,job_id=identity["identity_value"],job_title=title,locations=locations,department=department,
             job_category=category,recruitment_type=recruitment,responsibilities=resp_lines,requirements=req_lines,
+            recruitment_scopes=scopes,education=education,major=major or None,headcount=_positive_headcount(raw.get("amount")),
             full_jd=full,detail_url=detail if isinstance(detail,str) else None,apply_url=detail if isinstance(detail,str) else None,
             source_url=self.plan.source_url,
             raw_data={**safe_business_data(raw),"_identity":identity,"_jd_state":jd_state,
@@ -283,6 +416,8 @@ class GenericHttpCollector:
         # browser never attempted (budget cap) keep their original error.
         return raws,{str(jid) for jid in resolved_ids}|{str(jid) for _,jid in blocked}
     def collect(self)->CollectionResult:
+        if len(self.plan.list_scopes)>1:
+            return self._collect_multi_scope()
         gaps=transport_gaps(self.plan)
         if gaps:
             from job_extractor.planning.execution_contract import GAP_REASONS
@@ -339,9 +474,13 @@ class GenericHttpCollector:
                 # configured offset step and retain the normal no-progress /
                 # max-page safety guards above.
                 short_page=bool(configured_size and len(records)<configured_size)
-                offset_has_remaining_total=(self.plan.pagination_type=="OFFSET" and isinstance(expected,int)
-                                            and unique_count<expected and unique_count>previous_unique)
-                if short_page and not offset_has_remaining_total:
+                # A provider may cap a requested page size.  With an
+                # authoritative total, a short PAGE/OFFSET response is not an
+                # end signal until that total is reached; stopping here would
+                # silently drop later pages after a safe page-size increase.
+                has_remaining_total=(self.plan.pagination_type in ("PAGE","OFFSET") and isinstance(expected,int)
+                                     and unique_count<expected and unique_count>previous_unique)
+                if short_page and not has_remaining_total:
                     termination="SHORT_PAGE";break
                 if self.plan.pagination_type=="PAGE":
                     key=self.plan.page_param;target=values if key in values else query_values;before=int(target.get(key,0));target[key]=before+1

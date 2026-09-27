@@ -1,9 +1,10 @@
 from __future__ import annotations
 import re
 from typing import Any
+from urllib.parse import urlsplit
 from job_extractor.discovery.models import ApiCandidate,DiscoveryResult
 from job_extractor.planning.execution_contract import missing_fields
-from job_extractor.planning.models import CollectionPlan
+from job_extractor.planning.models import CollectionPlan,ListScope
 from job_extractor.planning.validator import CollectionPlanValidator
 from job_extractor.field_semantics import infer_field
 
@@ -59,6 +60,54 @@ def _trusted_scope_body(body:dict[str,Any],detected_scope:dict[str,Any])->dict[s
         resolved[key]=str(ref)
     return resolved
 
+_SCOPE_ID_KEYS=("nature","project_id","projectid","recruitment_type","recruitmenttype","channel","campaign","batch")
+_PAGE_KEYS=("page","page_size","pagesize","pageindex","pageno","current","offset","limit","size","cursor")
+
+def _scope_identity(values:dict[str,Any])->dict[str,Any]:
+    """Observed request fields which define a distinct job collection set."""
+    return {key:value for key,value in values.items()
+            if key.lower() in _SCOPE_ID_KEYS and key.lower() not in _PAGE_KEYS}
+
+def _scope_label(candidate:ApiCandidate,index:int)->str:
+    # A UI tab is the authoritative identity of a collected scope.  Records
+    # within a campaign tab can legitimately describe their own recruitment
+    # type differently, so sample payload metadata is fallback-only.
+    phase=str(candidate.observed_phase or "")
+    if phase.startswith("SCOPE_"):
+        label=phase.removeprefix("SCOPE_").strip()
+        if label:return label
+    hint=candidate.sample_job_hint or {}
+    for key in ("recruitment_type_cn","recruitmentTypeName","nature_cn","natureName"):
+        value=hint.get(key)
+        if isinstance(value,str) and value.strip():return value.strip()
+    return f"招聘 scope {index + 1}"
+
+def _candidate_pagination(result:DiscoveryResult,candidate:ApiCandidate)->tuple[str,str|None,str|None,str|None,str|None,str|None,str|None]:
+    """Use each observed request's own pagination contract when necessary.
+
+    Discovery's top-level pagination record belongs to its selected probable
+    endpoint.  A second, equally credible recruitment scope may legitimately
+    use another endpoint, so infer its page controls from that observed request
+    rather than marking it non-executable by association.
+    """
+    detected=result.detected_pagination
+    if candidate.url==getattr(result.probable_list_api,"url",None):
+        return (detected.pagination_type,detected.page_param,detected.page_size_param,
+                detected.cursor_param,detected.next_cursor_field,detected.has_more_field,
+                detected.page_param if detected.pagination_type=="OFFSET" else None)
+    values=candidate.safe_request_values if candidate.method=="POST" else candidate.query_params
+    lookup={str(key).lower():str(key) for key in values}
+    def named(*names:str)->str|None:
+        return next((lookup[name] for name in names if name in lookup),None)
+    page=named("page","pageindex","pageno","current")
+    size=named("page_size","pagesize","size","limit")
+    offset=named("offset","skip")
+    cursor=named("cursor","after","endcursor")
+    if page and size:return "PAGE",page,size,None,None,None,None
+    if offset and size:return "OFFSET",offset,size,None,None,None,offset
+    if cursor:return "CURSOR",cursor,size,cursor,candidate.response_shape.get("next_cursor_field"),candidate.response_shape.get("has_more_field"),None
+    return "UNKNOWN",None,None,None,None,None,None
+
 class CollectionPlanBuilder:
     def _api_plan(self,result:DiscoveryResult,candidate:ApiCandidate)->CollectionPlan:
         fields=candidate.response_shape.get("sample_field_names") or []
@@ -88,7 +137,7 @@ class CollectionPlanBuilder:
         medium=candidate.confidence=="MEDIUM" and not candidate.rejection_reasons
         sensitive_request=any(v=="[REDACTED]" for v in list(candidate.query_params.values())+list(candidate.request_body_shape.values()))
         browser_required=bool(candidate.graphql_operation) and candidate.replayable
-        pagination=result.detected_pagination.pagination_type if candidate.url==getattr(result.probable_list_api,"url",None) else "UNKNOWN"
+        pagination,page_param,page_size_param,cursor_param,next_cursor_field,has_more_field,offset_param=_candidate_pagination(result,candidate)
         single_evidence=(candidate.observed_total is not None and candidate.observed_total==candidate.observed_list_length) or candidate.observed_has_more is False or any("DOM visible job count equals" in x or "bounded unpaginated response" in x for x in candidate.evidence)
         if pagination=="UNKNOWN" and single_evidence:pagination="SINGLE_RESPONSE"
         detail_status=result.detail_dom.get("status")
@@ -115,8 +164,8 @@ class CollectionPlanBuilder:
             warnings=list(warnings)+["INCONSISTENT_TOTAL_TERMINATION"]
         api_plan=CollectionPlan(source_url=result.source_url,company=result.company,mode=mode,executable=executable,
             review_required=medium or (structurally_high and not executable),list_endpoint=candidate.url,list_method=candidate.method,pagination_type=pagination,
-            page_param=result.detected_pagination.page_param,offset_param=result.detected_pagination.page_param if pagination=="OFFSET" else None,page_size_param=result.detected_pagination.page_size_param,cursor_param=result.detected_pagination.cursor_param,
-            next_cursor_field=result.detected_pagination.next_cursor_field,has_more_field=result.detected_pagination.has_more_field,
+            page_param=page_param,offset_param=offset_param,page_size_param=page_size_param,cursor_param=cursor_param,
+            next_cursor_field=next_cursor_field,has_more_field=has_more_field,
             initial_values=candidate.safe_request_values,query_values={k:v for k,v in candidate.query_params.items() if v!="[REDACTED]"} if candidate.method=="POST" else {},body_encoding="FORM" if "application/x-www-form-urlencoded" in (candidate.request_content_type or "").lower() else "JSON",observed_list_length=candidate.observed_list_length,observed_total=candidate.observed_total,total_field=None if inconsistent_total else candidate.response_shape.get("total_field"),list_path=candidate.response_shape.get("candidate_list_path"),list_item_path=candidate.list_item_path,job_id_field=jid,job_title_field=title,
             detail_mode=detail,detail_endpoint_template=detail_template,detail_method=detail_candidate.method if detail_candidate else None,detail_id_field=jid,detail_url_field=url_field,browser_trigger="AUTO_PAGINATION" if mode=="BROWSER_API" else None,
             detail_title_selector=detail_dom.get("title_selector"),detail_location_selector=detail_dom.get("location_selector"),detail_department_selector=detail_dom.get("department_selector"),detail_employment_type_selector=detail_dom.get("employment_type_selector"),detail_jd_selector=detail_dom.get("jd_selector"),
@@ -213,4 +262,34 @@ class CollectionPlanBuilder:
             tier=5 if high_ready and plan.mode in ("HTTP_API","BROWSER_API","SERIALIZED_STATE") else 4.5 if high_ready and plan.mode=="HTML" else 4 if high_ready and plan.mode=="BROWSER_RUNTIME_DATA" else 3 if high_ready and plan.mode=="DOM" else 2 if plan.review_required else 1
             list_sufficient=plan.detail_mode=="LIST_SUFFICIENT" and plan.mode in ("HTTP_API","BROWSER_API","SERIALIZED_STATE","BROWSER_RUNTIME_DATA")
             return list_sufficient,tier,plan.confidence=="HIGH",plan.mode!="UNSUPPORTED"
-        return max(plans,key=rank)
+        selected=max(plans,key=rank)
+        # A recruitment site can expose its tabs through different list
+        # endpoints. Keep independently observed, executable API scopes when
+        # their transport host and job-record schema agree; each ListScope
+        # preserves its own endpoint and pagination contract. This retains the
+        # previous winner-takes-best behaviour for unrelated APIs.
+        if selected.mode in ("HTTP_API","BROWSER_API"):
+            siblings=[]
+            selected_host=(urlsplit(selected.list_endpoint or "").hostname or "").lower()
+            for index,(candidate,plan) in enumerate(zip(result.candidate_list_apis[:5],plans)):
+                if (not plan.executable or plan.mode!=selected.mode or
+                    (urlsplit(plan.list_endpoint or "").hostname or "").lower()!=selected_host or
+                    plan.body_encoding!=selected.body_encoding or plan.list_path!=selected.list_path or
+                    plan.list_item_path!=selected.list_item_path or plan.job_id_field!=selected.job_id_field or
+                    plan.job_title_field!=selected.job_title_field):
+                    continue
+                identity=_scope_identity(plan.initial_values if plan.list_method=="POST" else plan.query_values)
+                if not identity:
+                    continue
+                scope=ListScope(label=_scope_label(candidate,index),identity=identity,
+                    endpoint=plan.list_endpoint or "",method=plan.list_method or "GET",
+                    initial_values=plan.initial_values,query_values=plan.query_values,
+                    pagination_type=plan.pagination_type,page_param=plan.page_param,
+                    page_size_param=plan.page_size_param,offset_param=plan.offset_param,
+                    cursor_param=plan.cursor_param,next_cursor_field=plan.next_cursor_field,
+                    has_more_field=plan.has_more_field,total_field=plan.total_field,
+                    official_total=plan.observed_total)
+                if not any(existing.identity==scope.identity for existing in siblings):siblings.append(scope)
+            if len(siblings)>1:
+                selected=selected.model_copy(update={"list_scopes":siblings})
+        return selected

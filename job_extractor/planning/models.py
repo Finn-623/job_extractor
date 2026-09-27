@@ -3,6 +3,24 @@ from typing import Any,Literal
 from pydantic import BaseModel,Field,PrivateAttr
 from job_extractor.discovery.models import ATSProfile
 
+class ListScope(BaseModel):
+    """One independently pageable job collection scope on the same site."""
+    label: str
+    identity: dict[str, Any] = Field(default_factory=dict)
+    endpoint: str
+    method: str
+    initial_values: dict[str, Any] = Field(default_factory=dict)
+    query_values: dict[str, Any] = Field(default_factory=dict)
+    pagination_type: str = "UNKNOWN"
+    page_param: str | None = None
+    page_size_param: str | None = None
+    offset_param: str | None = None
+    cursor_param: str | None = None
+    next_cursor_field: str | None = None
+    has_more_field: str | None = None
+    total_field: str | None = None
+    official_total: int | None = None
+
 class CollectionPlan(BaseModel):
     source_url:str
     company:str|None=None
@@ -75,6 +93,9 @@ class CollectionPlan(BaseModel):
     observed_endpoints:list[str]=Field(default_factory=list)
     ats_profile:ATSProfile|None=None
     runtime_source:dict[str,Any]=Field(default_factory=dict)
+    # Empty preserves the existing single-list fast path.  When populated,
+    # each entry is a separately observed, independently pageable job scope.
+    list_scopes:list[ListScope]=Field(default_factory=list)
     # Process-local replay context for redacted query values.  This must never
     # become part of a serialized plan or any collection/report artifact.
     _runtime_query_params:dict[str,Any]=PrivateAttr(default_factory=dict)

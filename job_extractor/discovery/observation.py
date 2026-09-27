@@ -133,6 +133,7 @@ def wait_for_activity_quiet(
     dom_stable_polls: int = DOM_STABLE_POLLS,
     semantic_grace_ms: int = SEMANTIC_GRACE_MS,
     has_high_confidence_source: Callable[[], bool] = lambda: False,
+    deadline_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Wait until page activity is settled, then return the decision evidence.
 
@@ -142,6 +143,11 @@ def wait_for_activity_quiet(
     extension.  A HIGH-confidence source allows an early exit after one short
     quiet tail so discovery does not idle once the answer is already known.  The
     hard maximum deadline always terminates the loop (no unbounded waiting).
+
+    ``deadline_check`` lets a caller share its own deadline (e.g. the detector's
+    source-discovery budget): every loop iteration tests it and the wait exits
+    immediately with reason ``CALLER_DEADLINE_EXPIRED`` once it fires.  Callers
+    without a deadline keep their existing behaviour unchanged.
     """
     started = clock._clock()
     previous_dom = None
@@ -152,6 +158,9 @@ def wait_for_activity_quiet(
         now = clock._clock()
         elapsed = (now - started) * 1000
         quiet = clock.quiet_ms(now)
+        if deadline_check is not None and deadline_check():
+            reason = "CALLER_DEADLINE_EXPIRED"
+            break
         try:
             current_dom = dom_snapshot()
         except Exception:
@@ -188,6 +197,9 @@ def wait_for_activity_quiet(
         page.wait_for_timeout(min(poll_interval_ms, max(0, max_observation_ms - elapsed)))
         if clock._clock() - started >= max_observation_ms / 1000:
             reason = "MAX_OBSERVATION_DEADLINE"
+            break
+        if deadline_check is not None and deadline_check():
+            reason = "CALLER_DEADLINE_EXPIRED"
             break
     return {
         "reason": reason,

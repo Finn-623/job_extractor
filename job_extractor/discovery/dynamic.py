@@ -4,7 +4,7 @@ import json
 import re
 from copy import deepcopy
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 from job_extractor.discovery.network_analyzer import find_array_info, get_path, sensitive
 
@@ -220,16 +220,21 @@ def embedded_states_from_html(html: str) -> list[Any]:
     return values
 
 
-def wait_for_hydration(page, candidate_count, timeout_ms: int = 5000, interval_ms: int = 250) -> dict[str, Any]:
+def wait_for_hydration(page, candidate_count, timeout_ms: int = 5000, interval_ms: int = 250, deadline_check: Callable[[], bool] | None = None) -> dict[str, Any]:
     """Wait for a usable document, never for the window ``load`` event.
 
     A mounted SPA may remain ``interactive`` while an image or font request
     never settles.  Conversely, an empty root that merely stops changing is
     still only a shell.  Start discovery once an interactive/complete document
     has a concrete mount or meaningful rendered/source evidence.
+
+    ``deadline_check`` lets a caller share its own deadline (e.g. the detector's
+    source-discovery budget) so this wait can never outlive it.
     """
     stable = 0; previous = None; elapsed = 0
     while elapsed < timeout_ms:
+        if deadline_check is not None and deadline_check():
+            return {"stabilized": False, "elapsed_ms": elapsed, "state": previous[0] if previous else None, "deadline_expired": True}
         try:
             signal=page.evaluate("""() => {
                 const root=document.querySelector('#app,#root,main,[role="main"]');
@@ -254,16 +259,20 @@ def wait_for_hydration(page, candidate_count, timeout_ms: int = 5000, interval_m
     return {"stabilized": False, "elapsed_ms": elapsed, "state": previous[0] if previous else None}
 
 
-def wait_for_readiness_consensus(page, candidate_count, timeout_ms: int = 10000) -> dict[str, Any]:
-    """Give asynchronous module chains a bounded chance before declaring no source."""
+def wait_for_readiness_consensus(page, candidate_count, timeout_ms: int = 10000, deadline_check: Callable[[], bool] | None = None) -> dict[str, Any]:
+    """Give asynchronous module chains a bounded chance before declaring no source.
+
+    ``deadline_check`` lets a caller share its own deadline so neither this poll
+    loop nor the short hydration tail can outlive it.
+    """
     before = candidate_count();started=perf_counter()
     network_idle = False
     elapsed=max(0,int((perf_counter()-started)*1000));interval=250
-    while candidate_count()<=before and elapsed<timeout_ms:
+    while candidate_count()<=before and elapsed<timeout_ms and not (deadline_check is not None and deadline_check()):
         page.wait_for_timeout(min(interval,timeout_ms-elapsed));elapsed+=interval
     hydration={"stabilized":False}
     if candidate_count()>before:
-        hydration=wait_for_hydration(page,candidate_count,timeout_ms=min(1500,timeout_ms),interval_ms=250)
+        hydration=wait_for_hydration(page,candidate_count,timeout_ms=min(1500,timeout_ms),interval_ms=250,deadline_check=deadline_check)
     after = candidate_count()
     return {
         "network_idle": network_idle,

@@ -335,6 +335,11 @@ pip install -r requirements.txt
 - 使用 [Manual cURL 指南](MANUAL_CURL.md) 手动兜底
 - 或到 GitHub 提 Issue（注意脱敏，见下节）
 
+### 问题 24：需要诊断 discovery 或招聘范围识别
+
+默认运行不会输出内部 trace。复现问题时可仅对该次运行设置
+`JOB_EXTRACTOR_TRACE=1`；输出可能包含请求结构信息，提交前请先脱敏。
+
 ## 提 Issue 前请检查
 
 **绝对不要**在 Issue、截图或日志里提交：

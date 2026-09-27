@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import io
+import tempfile
 from contextlib import redirect_stdout
+from pathlib import Path
 
 import pytest
 
 from job_extractor.models import CollectionMetrics, CollectionResult, Job
 from job_extractor.reporting.manager import ReportArtifacts
+from job_extractor.debug_trace import emit as debug_trace
 from job_extractor.progress import (
     ProgressReporter, STAGES, fmt_clock, progress_bar, translate_reason,
 )
@@ -55,9 +58,13 @@ def job(n: int = 1) -> Job:
 
 
 def result(status: str = "COMPLETE", jobs: int = 2, *, strategy="LIST_SUFFICIENT",
-           detail_ok: int = 0, detail_fail: int = 0) -> CollectionResult:
+           detail_ok: int = 0, detail_fail: int = 0, raw_rows: int | None = None,
+           duplicate_jobs: int = 0, cross_scope_merged_rows: int = 0) -> CollectionResult:
     metrics = CollectionMetrics(jd_strategy=strategy, details_succeeded=detail_ok,
-                                details_failed=detail_fail, elapsed_seconds=8.4)
+                                details_failed=detail_fail, elapsed_seconds=8.4,
+                                raw_rows=jobs if raw_rows is None else raw_rows,
+                                duplicate_jobs=duplicate_jobs,
+                                cross_scope_merged_rows=cross_scope_merged_rows)
     return CollectionResult(platform="zhiye", company="鸿擎科技",
                             source_url="https://x.example/a", status=status,
                             jobs=[job(i) for i in range(1, jobs + 1)],
@@ -77,10 +84,10 @@ def artifacts(tmp_path) -> ReportArtifacts:
 def test_stage_start_and_complete_lines():
     rep, sink = make_reporter()
     rep.stage(1)
-    assert "[1/5] 识别招聘网站" in sink.lines[-1]
+    assert "[1/5] 识别网站与招聘范围" in sink.lines[-1]
     advance(rep, 1.0)
     rep.stage(2)  # opening stage 2 auto-completes stage 1
-    assert any("识别招聘网站" in l and "✓" in l for l in sink.lines)
+    assert any("识别网站与招聘范围" in l and "✓" in l for l in sink.lines)
 
 
 # 2 — per-stage timing -------------------------------------------------------
@@ -163,7 +170,42 @@ def test_list_sufficient_permanent_no_animation():
     rep.stage(5)
     raw = sink.raw_text
     assert "[4/5]" in raw and "✓" in raw and "0.0s" in raw
-    assert "列表已包含完整 JD · 48 / 48" in raw and "█" not in raw
+    assert "列表已包含完整 JD" in raw and "完整：48 · 失败：0" in raw and "█" not in raw
+
+
+def test_stage_completion_uses_raw_and_cross_scope_metrics_without_duplicate_heading():
+    rep, sink = make_reporter(tty=True)
+    rep.stage(1)
+    rep.discovery_scope_progress()
+    rep.stage_summary(1, "3 个招聘范围")
+    advance(rep, 1.2)
+    rep.stage(2)
+    rep.note(2, "777 条原始记录")
+    advance(rep, 2.3)
+    rep.stage(3)
+    rep.note(3, "762 个唯一岗位\n单范围重复：0 · 跨范围合并：15")
+    advance(rep, 0.1)
+    rep.stage(4)
+
+    frame = sink.raw[-1]
+    assert "✓ [1/5] 识别网站与招聘范围" in frame and "3 个招聘范围" in frame
+    assert "✓ [2/5] 获取岗位数据" in frame and "777 条原始记录" in frame
+    assert "✓ [3/5] 整理与去重" in frame and "762 个唯一岗位" in frame
+    assert "单范围重复：0 · 跨范围合并：15" in frame
+    assert "正在完善岗位 JD" in frame
+    assert "流程进度" not in sink.raw_text
+
+
+def test_detail_stage_closes_without_an_active_stage4_line():
+    rep, sink = make_reporter(tty=True)
+    rep.stage(4)
+    rep.detail_progress(4, 5, ok=3, fail=1, title="岗位")
+    rep.stage(5)
+
+    frame = sink.raw[-1]
+    assert "✓ [4/5] 完善岗位 JD" in frame
+    assert "完整：3 · 失败：1" in frame
+    assert "▶ [4/5]" not in frame
 
 
 # 10 — success summary ---------------------------------------------------------
@@ -176,13 +218,28 @@ def test_success_summary(tmp_path):
     assert "完成 ✓" in joined
     assert "公司：鸿擎科技" in joined
     assert "岗位数：2" in joined
-    assert "JD 成功：2" in joined
+    assert "原始记录：2" in joined
+    assert "唯一岗位：2" in joined
+    assert "单范围重复：0" in joined
+    assert "跨范围合并：0" in joined
+    assert "JD 完整：2" in joined
     assert "JD 失败：0" in joined
-    assert "重复岗位：0" in joined
+    assert "重复岗位：" not in joined
     assert "总耗时：00:08.9" in joined
     assert f"输出：\n{tmp_path / 'run'}/" in joined or "输出：" in joined
     for name in ("jobs.json", "jobs.xlsx", "report.md", "collection.json"):
         assert f"- {name}" in joined
+
+
+def test_success_summary_separates_within_scope_and_cross_scope_duplicates(tmp_path):
+    rep, sink = make_reporter()
+    rep.success_summary(result(jobs=3, raw_rows=777, duplicate_jobs=0,
+                               cross_scope_merged_rows=15), artifacts(tmp_path))
+    joined = "\n".join(sink.lines)
+    assert "原始记录：777" in joined
+    assert "唯一岗位：3" in joined
+    assert "单范围重复：0" in joined
+    assert "跨范围合并：15" in joined
 
 
 # 11 — failed summary ------------------------------------------------------------
@@ -194,7 +251,7 @@ def test_failed_summary():
     rep.failed_summary(2, "DISCOVERY_FAILED: no usable endpoint")
     joined = "\n".join(sink.lines)
     assert "抓取失败 ✗" in joined
-    assert "失败阶段：[2/5] 获取岗位列表" in joined
+    assert "失败阶段：[2/5] 获取岗位数据" in joined
     assert "原因：未找到可用岗位数据源" in joined
     assert "最近错误：2089623325708931073 — 请求超时（已重试 1 次）" in joined
     assert "总耗时：00:25.1" in joined
@@ -236,7 +293,7 @@ def test_jd_updates_produce_one_dynamic_record():
     rep.stage(5)
     joined = sink.raw_text
     assert "[4/5]" in joined and "✓" in joined
-    assert "成功 6 / 失败 0" in joined
+    assert "完整：6 · 失败：0" in joined
 
 
 def test_tty_pagination_refresh():
@@ -259,7 +316,7 @@ def test_stage_completion_becomes_permanent_line():
     assert "\x1b[J" in sink.raw_text  # dynamic area wiped on stage close
     joined = sink.raw_text
     assert "[4/5]" in joined and "✓" in joined and "163.0s" in joined
-    assert "成功 297 / 失败 3" in joined
+    assert "完整：297 · 失败：3" in joined
 
 
 def test_tty_error_line_refresh():
@@ -436,7 +493,8 @@ def test_step961_tty_header_present_exactly_once_and_not_in_dynamic_frames():
     assert _header_counts(sink) == (1, 1)  # permanent text: exactly once each
     assert sink.raw_text.count("公司：思格新能源") == 0  # never re-written by frames
     assert sink.raw_text.count("来源：https://jobs.sigenergy.com/campus") == 0
-    assert "流程进度" in sink.raw_text  # board still renders stage rows
+    assert "流程进度" not in sink.raw_text
+    assert "当前进度" in sink.raw_text  # board still renders stage rows
 
 
 def test_step961_success_summary_company_not_counted_as_header_dup(tmp_path):
@@ -456,8 +514,8 @@ def test_step961_stage_states_no_regression():
     rep.stage(2); rep.close_current(); rep.stage(3)
     rep.stage_fail(3, "TIMEOUT")
     joined = "\n".join(sink.lines)
-    assert "[2/5] 获取岗位列表   ✓" in joined
-    assert "✗ [3/5] 处理岗位数据" in joined
+    assert "✓ [2/5] 获取岗位数据" in joined
+    assert "✗ [3/5] 整理与去重" in joined
     assert _header_counts(sink) == (1, 1)
 
     rep2, sink2 = make_reporter(tty=True)
@@ -465,3 +523,151 @@ def test_step961_stage_states_no_regression():
     rep2.stage(1); rep2.close_current(); rep2.stage(2)
     raw = sink2.raw_text
     assert "▶ [2/5]" in raw and "○ [3/5]" in raw and "✓ [1/5]" in raw
+
+
+# -- STEP99: real-terminal in-place refresh + trace gating (raw byte stream) --
+def test_step99_consecutive_refreshes_leave_one_frame():
+    """Requirement 1: frames A/B/C must overwrite each other, not append."""
+    rep, sink = make_reporter(tty=True)
+    rep.stage(1)
+    advance(rep, 2.0); rep._frame += 1; rep._refresh()
+    advance(rep, 3.0); rep._frame += 1; rep._refresh()
+    final = sink.raw[-1]
+    # The LAST frame must carry the newest elapsed; earlier frames only exist
+    # as overwritten bytes, never as new appended rows (no stale '00:00' row
+    # below/above the final block on a real terminal).
+    assert "进行中 · 00:05" in final
+    assert "进行中 · 00:02" not in final  # replaced in place
+    # frame 2/3 re-enter the full block via cursor-up + column reset
+    assert f"\x1b[{rep._dyn_height - 1}A\r" in final
+    # nothing was appended as permanent lines during refreshes
+    assert len(sink.lines) == 0
+    # the older frame content was repainted, not duplicated in this frame
+    assert final.count("进行中 · 00:05") == 1
+
+
+def test_step99_frame_height_growth_repaints_all_rows():
+    """Requirement 2: board growth (completed-stage note rows) repaints in place."""
+    rep, sink = make_reporter(tty=True)
+    rep.stage(1)
+    rep.close_current()  # stops the heartbeat -> deterministic renders
+    rep._refresh()
+    base = rep._dyn_height
+    assert base == len(rep._live_lines()) >= 11
+    # a multiline completed-stage note grows the frame by one extra row
+    rep.note(1, "3 个招聘范围\n额外说明行")
+    rep._refresh()
+    grown = rep._dyn_height
+    assert grown == base + 1
+    final = sink.raw[-1]
+    # repaint enters exactly at the previous block start (old height - 1 rows
+    # up + column 1) and covers every row of the taller new frame
+    assert f"\x1b[{base - 1}A\r" in final
+    for n in range(1, 6):
+        assert f"[{n}/5]" in final
+    assert "额外说明行" in final
+
+
+def test_step99_shrinking_frame_wipes_leftover_rows():
+    """Requirement 3: removed rows (stage note) must be erased below."""
+    rep, sink = make_reporter(tty=True)
+    rep.stage(1)
+    rep.close_current()  # stop heartbeat so renders are deterministic
+    rep.note(1, "临时多行第一行\n第二行\n第三行")
+    rep._refresh()
+    tall = rep._dyn_height
+    assert tall == len(rep._live_lines()) and tall >= 13  # 3 note rows present
+    rep.note(1, "")  # note disappears -> frame shrinks by the 2 extra rows
+    rep._refresh()
+    assert rep._dyn_height == tall - 2 < tall
+    assert "\x1b[J" in sink.raw[-1]  # leftover rows wiped
+
+
+def test_step99_multiline_note_alignment():
+    """Requirement 4: multiline stage notes must not misplace the frame."""
+    rep, sink = make_reporter(tty=True)
+    rep.stage(1); rep.note(1, "3 个招聘范围")
+    advance(rep, 1.2)
+    rep.stage(2); rep.note(2, "777 条原始记录")
+    advance(rep, 2.3)
+    rep.stage(3); rep.note(3, "762 个唯一岗位\n单范围重复：0 · 跨范围合并：15")
+    advance(rep, 0.5)
+    rep.stage(4)
+    rep.stop_heartbeat()
+    rep._refresh()
+    final = sink.raw[-1]
+    assert "✓ [1/5]" in final and "✓ [2/5]" in final and "✓ [3/5]" in final
+    # multiline note renders as primary + extra row, board stays aligned
+    assert "762 个唯一岗位" in final and "单范围重复：0 · 跨范围合并：15" in final
+    assert "▶ [4/5]" in final
+    assert final.count("进行中") == 1  # only the active stage shows it
+
+
+def test_step99_finalize_leaves_single_summary_after_wipe(tmp_path):
+    """Requirement 8: finalize must erase the live frame, keep one summary."""
+    rep, sink = make_reporter(tty=True)
+    rep.begin("https://x.test/a")
+    rep.stage(1); rep.stage(2); rep.stage(3); rep.stage(4); rep.stage(5)
+    rep.close_current()
+    rep.success_summary(result(), artifacts(tmp_path))
+    # live area wiped exactly at the last close, then only permanent lines
+    assert sink.raw_text.count("\x1b[J") >= 1
+    joined = "\n".join(sink.lines)
+    assert joined.count("完成 ✓") == 1
+    assert "原始记录：" in joined and "跨范围合并：" in joined
+    # no live rows leak into the permanent summary
+    assert "预计剩余" not in joined and "当前进度" not in joined
+
+
+# -- STEP99 trace gate: default silent, opt-in visible, no frame cross-talk ----
+TRACE_MARKERS = ("SCOPE_TRACE", "TIMING_TRACE", "PROJECT_RESPONSE",
+                 "SCOPE_CANDIDATE", "DETECTOR_FINAL")
+
+
+def test_step99_trace_gate_off_by_default():
+    """Requirement A: default run never prints any internal diagnostic."""
+    rep, sink = make_reporter(tty=True)
+    rep.begin("https://x.test/a")
+    rep.stage(1)
+    for marker in TRACE_MARKERS:
+        debug_trace(marker, {"url": "https://x.test/api", "t": 1.0})
+    joined = sink.raw_text + "\n".join(sink.lines)
+    for marker in TRACE_MARKERS:
+        assert marker not in joined, marker
+
+
+def test_step99_trace_gate_enabled_by_env():
+    """Requirement B: explicit opt-in (JOB_EXTRACTOR_TRACE=1) still traces."""
+    rep, sink = make_reporter(tty=True)
+    rep.begin("https://x.test/a")
+    rep.stage(1)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("JOB_EXTRACTOR_TRACE", "1")
+        debug_trace("SCOPE_TRACE SCOPE_CANDIDATE", {"url": "https://x.test/api"})
+        debug_trace("TIMING_TRACE DETECTOR_FINAL", {"observation_count": 12})
+    permanent = "\n".join(sink.lines)
+    assert "SCOPE_TRACE SCOPE_CANDIDATE" in permanent
+    assert "TIMING_TRACE DETECTOR_FINAL" in permanent
+
+
+def test_step99_trace_does_not_cross_contaminate_frame():
+    """Requirement G: trace text is a permanent line; the next frame repaints
+    below it with no trace bytes inside the frame and no frame bytes over the
+    trace line."""
+    rep, sink = make_reporter(tty=True)
+    rep.begin("https://x.test/a")
+    rep.stage(1)
+    height_before = rep._dyn_height
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("JOB_EXTRACTOR_TRACE", "1")
+        debug_trace("SCOPE_TRACE SCOPE_CANDIDATE", {"url": "https://x.test/api"})
+    # the trace went out as one permanent line, board rows kept, frame reset
+    assert "SCOPE_TRACE SCOPE_CANDIDATE" in sink.lines[-1]
+    assert rep._dyn_height == 0
+    # next frame re-renders cleanly below the trace line
+    rep._refresh()
+    final = sink.raw[-1]
+    assert rep._dyn_height > 0
+    assert "SCOPE_TRACE" not in final  # no trace bytes inside frame
+    assert "\x1b[" not in sink.lines[-1]  # no frame bytes inside trace line
+    assert height_before > 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json,os,re
+from pathlib import Path
 from dataclasses import dataclass,field
 from datetime import datetime
 from time import perf_counter
@@ -9,7 +10,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from job_extractor.browser import BrowserRuntime,BrowserRuntimeError
 from job_extractor.discovery.models import ApiCandidate,CandidateSource,DiscoveryResult,ListContainer,NetworkSummary,PaginationDetection,RejectedCandidate,VisibleTotalEvidence,ProvenanceRecord,TerminalActivationTrace,RecruitmentAction
 from job_extractor.discovery.network_analyzer import request_shape,response_shape,safe_url,sanitized_values,find_field,get_path,list_observation,safe_business_data
-from job_extractor.discovery.observation import ActivityClock,wait_for_activity_quiet,url_is_job_semantic
+from job_extractor.discovery.observation import ActivityClock,MAX_OBSERVATION_MS,MIN_OBSERVATION_MS,wait_for_activity_quiet,url_is_job_semantic
 from job_extractor.discovery.boot_recovery import classify_boot_state,reload_allowed
 from job_extractor.discovery.pagination_semantics import infer_pagination_from_schema
 from job_extractor.discovery.scorer import confidence,reliable_list_candidate,score_detail,score_list
@@ -17,6 +18,8 @@ from job_extractor.discovery.dom_semantics import extract_company,extract_detail
 from job_extractor.discovery.dynamic import graphql_shape,is_pagination_control,navigation_trust,safe_graphql_body,serialized_states,visible_total_evidence,wait_for_dynamic_jd,wait_for_hydration,wait_for_readiness_consensus,window_state_blobs
 from job_extractor.discovery.sources import embedded_sources,recruitment_entries,select_terminal_actions,spa_action_inventory,classify_request,rank_spa_action,trigger_job_page_search
 from job_extractor.discovery.ats import profile_from_discovery
+from job_extractor.discovery.site_identity import resolve_site_company
+from job_extractor.debug_trace import emit as debug_trace
 from job_extractor.discovery.containers import bind_total_candidates,list_container_evidence
 from job_extractor import __version__
 
@@ -33,6 +36,12 @@ class _SourceDiscoveryComplete(Exception):
 
 class GenericApiDetector:
     threshold=10
+    recruitment_scope_budget_seconds=10
+    # Keep one source deadline, but do not let the first boot attempt consume
+    # the time needed to make the single permitted recovery meaningful.
+    _RECOVERY_RELOAD_ALLOWANCE_MS=1000
+    _RECOVERY_HYDRATION_ALLOWANCE_MS=750
+    _RECOVERY_TRIGGER_ALLOWANCE_MS=2250
     def __init__(self,browser_factory=BrowserRuntime,timeout_ms:int=15000,source_budget_seconds:int=25):
         self.browser_factory=browser_factory; self.timeout_ms=timeout_ms; self.source_budget_seconds=source_budget_seconds
     _JOB_PAGE_NODE_SELECTOR='a,button,[role="button"],[role="menuitem"],[data-route],li'
@@ -46,8 +55,44 @@ class GenericApiDetector:
         return any(self._reliable_list_source(candidate) for candidate in self._rank(observations))
 
     @classmethod
-    def _job_page_search_trigger(cls,page)->list[str]:
-        return trigger_job_page_search(page,cls._JOB_PAGE_NODE_SELECTOR)
+    def _job_page_search_trigger(cls,page,*,timeout_ms:int|None=None)->list[str]:
+        return trigger_job_page_search(page,cls._JOB_PAGE_NODE_SELECTOR,timeout_ms=timeout_ms)
+
+    @classmethod
+    def _recovery_reserve_ms(cls, discovery_budget_seconds:float)->int:
+        """Reserve reload, short hydration, trigger, and a real startup window.
+
+        This is a partition of the existing source deadline, never a second
+        budget.  Tiny test/caller budgets retain at least their startup minimum
+        where possible instead of producing a negative first-attempt budget.
+        """
+        reserve=(cls._RECOVERY_RELOAD_ALLOWANCE_MS + cls._RECOVERY_HYDRATION_ALLOWANCE_MS
+                 + cls._RECOVERY_TRIGGER_ALLOWANCE_MS + MIN_OBSERVATION_MS)
+        total_ms=max(0,int(discovery_budget_seconds*1000))
+        return min(reserve,max(0,total_ms-MIN_OBSERVATION_MS))
+
+    def _recovery_trigger(self,page,observations:list[_Observation],deadline:float)->dict[str,Any]:
+        """Try the existing generic trigger after reload without spending startup time."""
+        before_url=getattr(page,"url",None)
+        remaining_ms=max(0,int((deadline-perf_counter())*1000))
+        source=next((candidate for candidate in self._rank(observations) if self._reliable_list_source(candidate)),None)
+        trace={"recovery_trigger_attempted":False,"recovery_trigger_result":[],"clicked_text":[],
+               "url_before":before_url,"url_after":before_url,"remaining_budget_ms_before_trigger":remaining_ms}
+        if source:
+            trace["recovery_trigger_result"]="SKIPPED_ACCEPTED_SOURCE"
+            return trace
+        # The observation minimum is protected even when a visible control
+        # exists, so a trigger cannot recreate the old <1s recovery window.
+        trigger_budget_ms=min(self._RECOVERY_TRIGGER_ALLOWANCE_MS,max(0,remaining_ms-MIN_OBSERVATION_MS))
+        if trigger_budget_ms<=0:
+            trace["recovery_trigger_result"]="SKIPPED_STARTUP_WINDOW_RESERVED"
+            return trace
+        trace["recovery_trigger_attempted"]=True
+        clicked=self._job_page_search_trigger(page,timeout_ms=trigger_budget_ms)
+        trace["recovery_trigger_result"]="CLICKED" if clicked else "NO_JOB_CONTROL"
+        trace["clicked_text"]=clicked
+        trace["url_after"]=getattr(page,"url",before_url)
+        return trace
 
     @staticmethod
     def _body(request)->dict[str,Any]:
@@ -137,11 +182,11 @@ class GenericApiDetector:
             if gql.get("list_item_path"):sample=[get_path(x,gql["list_item_path"]) for x in sample]
         total_path=shape.get("total_field");total=get_path(observation.payload,total_path)
         has_more_path=shape.get("has_more_field") or find_field(observation.payload,{"hasmore","has_more","hasnextpage"});has_more=get_path(observation.payload,has_more_path)
-        hint={};company_names=set()
+        hint={};company_names=set();company_name_samples=set()
         url_field=None;url_coverage=0.0;unique_ids=None
         if sample and isinstance(sample[0],dict):
             item=sample[0]
-            for key in ("id","job_id","jobId","jobPostId","positionId","requisitionId","title","name","jobTitle","positionName","company_name",*tuple(("url","absolute_url","job_url","jobUrl","detail_url","detailUrl","apply_url","applyUrl","path","slug"))):
+            for key in ("id","job_id","jobId","jobPostId","positionId","requisitionId","title","name","jobTitle","positionName","company_name","recruitment_type_cn","recruitmentTypeName","nature_cn","natureName",*tuple(("url","absolute_url","job_url","jobUrl","detail_url","detailUrl","apply_url","applyUrl","path","slug"))):
                 if key in item and isinstance(item[key],(str,int)):hint[key]=item[key]
             if isinstance(item.get("company"),dict):hint["company"]={k:v for k,v in item["company"].items() if k in ("name","identifier") and isinstance(v,(str,int))}
             url_fields=[]
@@ -152,6 +197,7 @@ class GenericApiDetector:
                 company_value=record.get("company_name")
                 if not company_value and isinstance(record.get("company"),dict):company_value=record["company"].get("name")
                 if isinstance(company_value,str) and company_value.strip():company_names.add(company_value.strip())
+            if company_names:company_name_samples.update(company_names)
             if url_fields:
                 url_field=max(set(url_fields),key=url_fields.count);url_coverage=url_fields.count(url_field)/len(sample)
                 evidence.append(f"detail URL field {url_field} covers {url_fields.count(url_field)}/{len(sample)} sampled records")
@@ -178,7 +224,7 @@ class GenericApiDetector:
             observed_total=total if isinstance(total,int) else None,observed_has_more=has_more if isinstance(has_more,bool) else None,
             observed_unique_ids=unique_ids,detail_url_field=url_field,detail_url_coverage=url_coverage,
             homogeneity_score=shape.get("homogeneity_score",0.0),job_entity_density=shape.get("job_entity_density",0.0),
-            rejection_reasons=shape.get("rejection_reasons",[]),observed_company_count=len(company_names),list_item_path=shape.get("list_item_path"),replayable=replayable,graphql_operation=shape.get("graphql_operation"),graphql_page_info_path=shape.get("graphql_page_info_path"),source_type="SERIALIZED_STATE" if observation.method=="STATE" else ("GRAPHQL" if gql else "NETWORK_JSON"),source_index=observation.source_index,provenance=provenance,observed_phase="POST_ROUTE_NETWORK" if observation.phase=="POST_ROUTE_NETWORK" else observation.phase)
+            rejection_reasons=shape.get("rejection_reasons",[]),observed_company_count=len(company_names),observed_company_names=sorted(company_name_samples)[:30],list_item_path=shape.get("list_item_path"),replayable=replayable,graphql_operation=shape.get("graphql_operation"),graphql_page_info_path=shape.get("graphql_page_info_path"),source_type="SERIALIZED_STATE" if observation.method=="STATE" else ("GRAPHQL" if gql else "NETWORK_JSON"),source_index=observation.source_index,provenance=provenance,observed_phase="POST_ROUTE_NETWORK" if observation.phase=="POST_ROUTE_NETWORK" else observation.phase)
         # Retain only values that the safe candidate view deliberately hid.
         # Public query parameters remain in query_params and persisted plans.
         candidate._runtime_query_params={key:value for key,value in observation.runtime_query.items()
@@ -188,16 +234,156 @@ class GenericApiDetector:
     def _rank(observations:list[_Observation],detail:bool=False)->list[ApiCandidate]:
         grouped={}; counts={}
         for o in observations:
-            candidate=GenericApiDetector._candidate(o,detail); key=(candidate.url,candidate.method,candidate.source_index)
+            candidate=GenericApiDetector._candidate(o,detail)
+            # Requests to one endpoint are separate list candidates whenever
+            # observed non-pagination scope fields differ (e.g. campaign,
+            # nature, recruitment type).  Pagination requests for the same
+            # scope remain one candidate.
+            values=candidate.safe_request_values if candidate.method=="POST" else candidate.query_params
+            identity={k:v for k,v in values.items() if k.lower() in ("nature","project_id","projectid","recruitment_type","recruitmenttype","channel","campaign","batch")}
+            key=(candidate.url,candidate.method,candidate.source_index,json.dumps(identity,sort_keys=True,default=str))
             counts[key]=counts.get(key,0)+1
             if key not in grouped or candidate.score>grouped[key].score:grouped[key]=candidate
         for key,value in grouped.items():value.sample_count=counts[key]
         return sorted((x for x in grouped.values() if x.score>0 and not x.rejection_reasons),key=lambda x:(-x.score,x.url,x.method))
+
+    @staticmethod
+    def _enumerate_recruitment_scopes(page,base_url:str,observations:list[_Observation],phase:list[str],expired,social_trace=None)->None:
+        """Bounded tab enumeration after a real list source exists.
+
+        This is intentionally limited to visible controls whose full label is
+        explicitly recruitment-scope semantic.  A scope is accepted later
+        only if its click yields a normal high-confidence list response.
+        """
+        started=perf_counter();clicked_candidates=[];unresolved_scopes=[];exit_reason="completed"
+        def trace(event,**data):debug_trace(f"SCOPE_TRACE {event}",data)
+        def identity(body):return {k:v for k,v in (body or {}).items() if k.lower() in ("nature","project_id","projectid","recruitment_type","recruitmenttype","channel","campaign","batch")}
+        trace("SCOPE_ENUM_START",url=getattr(page,"url",base_url),deadline=getattr(expired,"deadline",None),remaining_seconds=max(0.0,getattr(expired,"deadline",started)-started),observations=len(observations))
+        try:
+            controls=page.evaluate("""() => [...document.querySelectorAll('a,button,[role=tab],[role=button]')]
+                .map((n,i)=>({i,text:(n.innerText||'').trim().replace(/\\s+/g,' '),href:n.getAttribute('href')||'',
+                    active:n.getAttribute('aria-current')==='page'||n.getAttribute('aria-selected')==='true'||/(^|\\s)(active|selected)(\\s|$)/.test(n.className||''),
+                    visible:!!(n.offsetWidth||n.offsetHeight||n.getClientRects().length)}))""") or []
+        except Exception as exc:
+            trace("SCOPE_ENUM_END",exit_reason="exception",exception=type(exc).__name__,elapsed=perf_counter()-started,candidates_seen=0,candidates_clicked=[]);return
+        pattern=re.compile(r"(?i)^(?:社会招聘|社招|校园招聘|校招|专项招聘|实习招聘|实习生|海外招聘|[\\w\\u4e00-\\u9fff ]{1,24}(?:招聘|招募)|campus(?: recruitment)?|social(?: recruitment)?|intern(?:ship)?s?|experienced hires?)$")
+        labels=[]
+        for control in controls:
+            label=str(control.get("text") or "").strip()
+            semantic=bool(pattern.match(label));accepted=bool(control.get("visible") and not control.get("active") and semantic and label not in labels)
+            reason="accepted" if accepted else "current_tab" if control.get("active") else "not_visible" if not control.get("visible") else "semantic_reject" if not semantic else "duplicate_label"
+            trace("SCOPE_CANDIDATE",index=control.get("i"),text=label,href=control.get("href"),visible=bool(control.get("visible")),semantic_match=semantic,accepted=accepted,reject_reason=reason)
+            if accepted:
+                labels.append(label)
+        if not labels:exit_reason="no_candidates"
+        for label in labels[:6]:
+            if expired():exit_reason="budget_expired";trace("SCOPE_CLICK_SKIP",text=label,reason="expired");break
+            prior_ids={id(observation) for observation in observations};before=len(observations);before_url=getattr(page,"url",base_url);phase[0]=f"SCOPE_{label}";scope_phase=phase[0]
+            href=next((str(x.get("href") or "") for x in controls if str(x.get("text") or "").strip()==label),"")
+            trace("SCOPE_CLICK_ATTEMPT",text=label,href=href,current_url=before_url,remaining_seconds=max(0.0,getattr(expired,"deadline",perf_counter())-perf_counter()))
+            try:
+                nodes=page.locator('a,button,[role=tab],[role=button]')
+                click_success=False
+                for index in range(min(nodes.count(),500)):
+                    if (nodes.nth(index).inner_text() or "").strip().replace("\n"," ")==label:
+                        nodes.nth(index).click(timeout=3000);click_success=True;break
+                if not click_success:
+                    trace("SCOPE_NAV_RESULT",candidate=label,before_url=before_url,after_url=getattr(page,"url",base_url),success=False,exception="CONTROL_NOT_FOUND");continue
+                # A mounted shell must never end this wait: hold the scope phase
+                # until THIS tab produced a new accepted list observation (or the
+                # bounded budget ran out).  DOM readiness is auxiliary only.
+                wait_started=perf_counter()
+                remaining_seconds=max(0.0,getattr(expired,"deadline",wait_started)-wait_started)
+                wait_budget_ms=int(min(5000,remaining_seconds*1000))
+                if scope_phase=="SCOPE_社会招聘" and social_trace:
+                    social_trace("SOCIAL_WAIT_START",scope_phase=scope_phase,wait_budget_ms=wait_budget_ms)
+                if wait_budget_ms<=0:
+                    wait_result={"accepted":False,"exit_reason":"budget_expired","elapsed_ms":0,"dom":None}
+                else:
+                    wait_result=GenericApiDetector._wait_for_accepted_scope_observation(page,observations,prior_ids,scope_phase,expired,timeout_ms=wait_budget_ms,interval_ms=250)
+                if scope_phase=="SCOPE_社会招聘" and social_trace:
+                    social_trace("SOCIAL_WAIT_END",scope_phase=scope_phase,accepted_current_phase_list=wait_result["accepted"],exit_reason=wait_result["exit_reason"],elapsed_ms=wait_result["elapsed_ms"],dom=wait_result.get("dom"))
+                clicked_candidates.append(label)
+                if not wait_result["accepted"]:
+                    unresolved_scopes.append({"label":label,"exit_reason":wait_result["exit_reason"],"elapsed_ms":wait_result["elapsed_ms"]})
+                trace("SCOPE_NAV_RESULT",candidate=label,before_url=before_url,after_url=getattr(page,"url",base_url),success=True,exception=None,accepted_scope_observation=wait_result["accepted"],wait=wait_result,wait_seconds=perf_counter()-wait_started)
+            except Exception as exc:
+                trace("SCOPE_NAV_RESULT",candidate=label,before_url=before_url,after_url=getattr(page,"url",base_url),success=False,exception=type(exc).__name__)
+                continue
+            for sequence,observation in enumerate(observations[before:],1):
+                if "project-job" not in observation.url:continue
+                candidate=GenericApiDetector._candidate(observation);trusted=GenericApiDetector._accepted_list_candidate(candidate)
+                trace("SCOPE_REQUEST",sequence=sequence,elapsed_seconds=perf_counter()-started,endpoint=candidate.url,method=candidate.method,nature=observation.body.get("nature"),project_id=observation.body.get("project_id"),total=candidate.observed_total,score=candidate.score,rejection_reasons=candidate.rejection_reasons,accepted_list_candidate=trusted,scope_identity=identity(observation.body))
+            retained=[identity(o.body if o.method=="POST" else o.query) for o in observations if GenericApiDetector._accepted_list_candidate(GenericApiDetector._candidate(o))]
+            trace("SCOPE_RETENTION",count=len({json.dumps(x,sort_keys=True,default=str) for x in retained}),identities=retained)
+        phase[0]="HYDRATION"
+        retained=[identity(o.body if o.method=="POST" else o.query) for o in observations if GenericApiDetector._accepted_list_candidate(GenericApiDetector._candidate(o))]
+        trace("SCOPE_ENUM_END",exit_reason=exit_reason,elapsed=perf_counter()-started,candidates_seen=len(controls),candidates_clicked=clicked_candidates,unresolved_scopes=unresolved_scopes,trusted_scope_identities=retained)
     @classmethod
     def _reliable_list_source(cls,candidate:ApiCandidate|None)->bool:
         return reliable_list_candidate(candidate)
+
+    @classmethod
+    def _accepted_list_candidate(cls,candidate:ApiCandidate|None)->bool:
+        """The same candidate gate used for the detector's final probable API."""
+        return bool(candidate and candidate.score>=cls.threshold and not candidate.rejection_reasons)
+
+    @classmethod
+    def _new_accepted_scope_observation(cls,observations:list[_Observation],prior_ids:set[int],scope_phase:str)->bool:
+        """Do not let a previous tab's delayed response satisfy this tab."""
+        return any(id(observation) not in prior_ids and observation.phase==scope_phase
+                   and cls._accepted_list_candidate(cls._candidate(observation)) for observation in observations)
+
+    @staticmethod
+    def _wait_for_accepted_scope_observation(page,observations:list[_Observation],prior_ids:set[int],scope_phase:str,expired,timeout_ms:int=5000,interval_ms:int=250)->dict[str,Any]:
+        """Wait for THIS scope phase to produce a new accepted list observation.
+
+        ``wait_for_hydration`` short-circuits on any mounted root
+        (rootChildren>0 / readyState complete), which an SPA satisfies with an
+        empty shell before the tab's list request is even issued.  A scope
+        click therefore only ends this wait when the observation predicate
+        fires; DOM readiness is recorded as auxiliary evidence and can never
+        terminate the wait on its own.  Bounded by the caller's shared
+        enumeration budget and ``timeout_ms`` — never an infinite wait.
+        """
+        started=perf_counter();deadline=started+max(0.0,timeout_ms/1000)
+        def dom_signal()->dict[str,Any]|None:
+            try:
+                return page.evaluate("""() => {
+                    const root=document.querySelector('#app,#root,main,[role="main"]');
+                    const text=(document.body?.innerText || '').trim();
+                    return {readyState:document.readyState,rootChildren:root?.childElementCount||0,links:document.querySelectorAll('a[href]').length,textLength:text.length};
+                }""")
+            except Exception:
+                return None
+        exit_reason="observation_timeout"
+        while True:
+            if GenericApiDetector._new_accepted_scope_observation(observations,prior_ids,scope_phase):
+                exit_reason="accepted_current_phase_list";break
+            if expired() or perf_counter()>=deadline:
+                exit_reason="budget_expired" if expired() else "observation_timeout";break
+            page.wait_for_timeout(interval_ms)
+        return {"accepted":exit_reason=="accepted_current_phase_list","exit_reason":exit_reason,"elapsed_ms":round((perf_counter()-started)*1000),"dom":dom_signal()}
+
+    def _accepted_list_source(self,observations:list[_Observation])->ApiCandidate|None:
+        ranked=self._rank(observations)
+        candidate=ranked[0] if ranked else None
+        return candidate if self._accepted_list_candidate(candidate) else None
+
+    def _effective_list_source(self,observations:list[_Observation],*fallbacks:ApiCandidate|None)->ApiCandidate|None:
+        """Use final-plan candidate semantics for scope enumeration only."""
+        current=next((candidate for candidate in self._rank(observations) if self._reliable_list_source(candidate)),None)
+        return current or next((candidate for candidate in fallbacks if candidate is not None),None) or self._accepted_list_source(observations)
+
+    def _scope_enumeration_expired(self):
+        """A bounded follow-up budget once a real list source is confirmed."""
+        deadline=perf_counter()+self.recruitment_scope_budget_seconds
+        def expired():return perf_counter()>=deadline
+        expired.deadline=deadline
+        return expired
+
     def discover(self,url:str,budget=None,terminal_mode:bool=False,upstream_entry_action:RecruitmentAction|None=None)->DiscoveryResult:
-        started=datetime.now(); clock=perf_counter(); observations=[]; phase=["TERMINAL_INITIAL" if terminal_mode else "INITIAL"]; summary=NetworkSummary(); dom={};detail_dom={};warnings=[];company=None;pagination_override=None;inventory=[];total_evidence=[];total_conflict=False;entries=[]
+        started=datetime.now(); clock=perf_counter(); observations=[]; phase=["TERMINAL_INITIAL" if terminal_mode else "INITIAL"]; summary=NetworkSummary(); dom={};detail_dom={};warnings=[];company=None;page_title=None;pagination_override=None;inventory=[];total_evidence=[];total_conflict=False;entries=[]
         timing_enabled=os.getenv("STEP95G_TIMING")=="1"; timings:dict[str,float]={}; events:dict[str,float]={}
         def timed(name:str,started_at:float)->None:
             if timing_enabled:timings[name]=timings.get(name,0.0)+(perf_counter()-started_at)
@@ -213,12 +399,35 @@ class GenericApiDetector:
                 handle.write("\n".join(lines)+"\n")
         terminal_trace=TerminalActivationTrace(terminal_url=url,scope="UNKNOWN",activation_started_at=started,upstream_entry_action=upstream_entry_action) if terminal_mode else None
         terminal_network=[];terminal_dom=[];terminal_actions=[];terminal_states=[];terminal_frames=[];runtime_source=None;internal_trace=[]
-        activity_clock=ActivityClock();boot_reload_count=0;boot_attempts=[];domcontentloaded=False
+        activity_clock=ActivityClock();boot_reload_count=0;boot_attempts=[];domcontentloaded=False;observation_policy={}
         # Terminal activation supplies a shared monotonic budget.  Honour it
         # here so an invisible downstream probe cannot outlive the caller's
         # deadline before the CLI has a chance to render a terminal result.
         discovery_budget_seconds=min(self.source_budget_seconds, budget.remaining) if budget is not None else self.source_budget_seconds
-        def _expired():return (perf_counter()-clock)>discovery_budget_seconds or bool(budget is not None and budget.expired)
+        # STEP97: one shared, monotonic deadline for the whole first source
+        # discovery lifecycle. Every navigation/wait inside this try block must
+        # consume remaining budget instead of stacking its own independent
+        # timeout, so a hung page converges at the source budget (25s) rather
+        # than the sum of serial waits (goto 15s + hydration 5s + activity 7.5s
+        # + readiness 15s ≈ 44s).
+        source_deadline=clock+discovery_budget_seconds
+        def remaining_source_seconds()->float:
+            return max(0.0,source_deadline-perf_counter())
+        def source_expired()->bool:
+            return remaining_source_seconds()<=0.0 or bool(budget is not None and budget.expired)
+        recovery_reserve_ms=self._recovery_reserve_ms(discovery_budget_seconds)
+        initial_attempt_deadline=source_deadline-recovery_reserve_ms/1000
+        def remaining_initial_attempt_seconds()->float:
+            return max(0.0,initial_attempt_deadline-perf_counter())
+        def initial_attempt_expired()->bool:
+            return remaining_initial_attempt_seconds()<=0.0 or bool(budget is not None and budget.expired)
+        def _expired():return source_expired()
+        social_trace_path=Path("output/debug_cosco_social_scope.jsonl");social_trace_path.parent.mkdir(parents=True,exist_ok=True);social_trace_path.write_text("",encoding="utf-8");social_sequence=[0]
+        def social_trace(event,**data):
+            social_sequence[0]+=1
+            social_trace_path.open("a",encoding="utf-8").write(json.dumps({"sequence":social_sequence[0],"event":event,"t":perf_counter()-clock,**data},ensure_ascii=False,default=str)+"\n")
+        project_request_starts={};request_phases={};first_accepted_time=[None]
+        debug_trace("TIMING_TRACE DETECTOR_START",{"source_deadline_seconds":discovery_budget_seconds})
         terminal_failure=None
         if budget is not None and budget.expired:
             write_timing()
@@ -227,6 +436,18 @@ class GenericApiDetector:
             browser_setup_started=perf_counter()
             with self.browser_factory(timeout_ms=self.timeout_ms) as runtime:
                 page=runtime.page
+                def request_started(request):
+                    request_phases[id(request)]=phase[0]
+                    # Social scope evidence: the tab's list transport is not
+                    # necessarily the project-job endpoint (this site's social
+                    # tab POSTs /api/jobs/v1/list with a nature filter), so the
+                    # trace gates key on the API namespace, not one path.
+                    if phase[0]=="SCOPE_社会招聘" and request.method=="POST" and "api/jobs/v1/" in request.url:
+                        social_trace("SOCIAL_NETWORK_REQUEST",request_phase=phase[0],url=safe_url(request.url)[0],nature=self._body(request).get("nature"),project_id=self._body(request).get("project_id"),company_id_with_sub=self._body(request).get("company_id_with_sub"),page=self._body(request).get("page"),page_size=self._body(request).get("page_size"))
+                    if request.method=="POST" and "api/jobs/v1/project-job" in request.url:
+                        project_request_starts[id(request)]=perf_counter()
+                        debug_trace("TIMING_TRACE PROJECT_REQUEST_START",{"t":perf_counter()-clock,"url":safe_url(request.url)[0]})
+                page.on("request",request_started)
                 timed("browser_setup",browser_setup_started)
                 def dom_snapshot():
                     try:
@@ -251,6 +472,7 @@ class GenericApiDetector:
                 def observe(response):
                     summary.observed_requests+=1
                     request=response.request
+                    project_response_at=perf_counter() if request.method=="POST" and "api/jobs/v1/project-job" in request.url else None
                     if request.resource_type in ("xhr","fetch"):activity_clock.record_activity(request.url)
                     if terminal_mode:
                         record={"phase":phase[0],"action_id":phase[0] if phase[0].startswith("TERMINAL_ACTION_") else None,"url":safe_url(request.url)[0],"method":request.method,"resource_type":request.resource_type,"status":response.status,"content_type":response.headers.get("content-type") or ""}
@@ -274,8 +496,16 @@ class GenericApiDetector:
                     summary.json_candidates+=1;summary.phase_json_candidates[phase[0]]=summary.phase_json_candidates.get(phase[0],0)+1; clean,query=safe_url(request.url)
                     activity_clock.record_json(request.url)
                     raw_query=dict(parse_qsl(urlsplit(request.url).query,keep_blank_values=True))
-                    observation = _Observation(request.url,request.method,self._body(request),query,payload,phase[0],request_content_type=request.headers.get("content-type"),runtime_query=raw_query)
+                    observation = _Observation(request.url,request.method,self._body(request),query,payload,request_phases.get(id(request),phase[0]),request_content_type=request.headers.get("content-type"),runtime_query=raw_query)
                     observations.append(observation)
+                    if observation.phase=="SCOPE_社会招聘" and "api/jobs/v1/" in observation.url:
+                        candidate=self._candidate(observation)
+                        social_trace("SOCIAL_NETWORK_RESPONSE",request_phase=observation.phase,url=clean,total=candidate.observed_total,response_success=True)
+                        social_trace("SOCIAL_OBSERVATION_CREATED",observation_id=id(observation),request_phase=observation.phase,current_scope_phase=phase[0],endpoint=candidate.url,score=candidate.score,rejection_reasons=candidate.rejection_reasons,accepted_list_candidate=self._accepted_list_candidate(candidate),reliable_list_source=self._reliable_list_source(candidate),scope_identity={k:v for k,v in observation.body.items() if k.lower() in ("nature","project_id","projectid","recruitment_type","recruitmenttype")})
+                    if project_response_at is not None:
+                        candidate=self._candidate(observation);accepted=self._accepted_list_candidate(candidate);reliable=self._reliable_list_source(candidate)
+                        if accepted and first_accepted_time[0] is None:first_accepted_time[0]=perf_counter()-clock
+                        debug_trace("TIMING_TRACE PROJECT_RESPONSE",{"request_t":project_request_starts.get(id(request)),"response_t":project_response_at-clock,"parsed_t":perf_counter()-clock,"inserted_t":perf_counter()-clock,"nature":observation.body.get("nature"),"project_id":observation.body.get("project_id"),"total":candidate.observed_total,"score":candidate.score,"rejection_reasons":candidate.rejection_reasons,"accepted":accepted,"reliable":reliable})
                     # Strong boot-recovery evidence is deliberately structural:
                     # reuse the normal generic list scorer/reliability gate,
                     # rather than treating a job-like URL (or its hostname) as
@@ -285,12 +515,18 @@ class GenericApiDetector:
                         event("first_candidate_seen")
                 page.on("response",observe)
                 navigation_started=perf_counter()
-                try:
-                    page.goto(url,wait_until="domcontentloaded",timeout=self.timeout_ms)
-                    domcontentloaded=True
-                except PlaywrightTimeoutError:
-                    warnings.append("NAVIGATION_TIMEOUT_CONTINUING")
+                debug_trace("TIMING_TRACE GOTO_START",{"t":perf_counter()-clock})
+                goto_deadline_ms=int(remaining_initial_attempt_seconds()*1000)
+                if goto_deadline_ms<=0:
+                    warnings.append("NAVIGATION_SKIPPED_SOURCE_BUDGET_EXHAUSTED")
+                else:
+                    try:
+                        page.goto(url,wait_until="domcontentloaded",timeout=min(self.timeout_ms,goto_deadline_ms))
+                        domcontentloaded=True
+                    except PlaywrightTimeoutError:
+                        warnings.append("NAVIGATION_TIMEOUT_CONTINUING")
                 timed("page_navigation",navigation_started)
+                debug_trace("TIMING_TRACE GOTO_END",{"t":perf_counter()-clock})
                 # STEP78A: page-side scripts can reset the freshly loaded
                 # document to about:blank within seconds of navigation (live
                 # evidence: goto → 22s idle with no detector code in between
@@ -301,7 +537,7 @@ class GenericApiDetector:
                 initial_inspect_started=perf_counter()
                 try:served_html=page.content()
                 except Exception:served_html=""
-                phase[0]="TERMINAL_HYDRATION" if terminal_mode else "HYDRATION";hydration=wait_for_hydration(page,lambda:len(observations))
+                phase[0]="TERMINAL_HYDRATION" if terminal_mode else "HYDRATION";hydration_started=perf_counter();hydration=wait_for_hydration(page,lambda:len(observations),timeout_ms=min(5000,int(remaining_initial_attempt_seconds()*1000)),deadline_check=initial_attempt_expired);debug_trace("TIMING_TRACE HYDRATION_END",{"start_t":hydration_started-clock,"end_t":perf_counter()-clock,"result":hydration})
                 if not hydration["stabilized"]:warnings.append("HYDRATION_TIMEOUT")
                 timed("dom_ready_initial_html_inspect",initial_inspect_started)
                 # Landing pages often load only campaign metadata.  Before
@@ -311,9 +547,9 @@ class GenericApiDetector:
                 safe_navigation_taken=False
                 quick_rank=self._rank(observations)
                 quick_source=next((candidate for candidate in quick_rank if self._reliable_list_source(candidate)),None)
-                if not quick_source and not _expired():
+                if not quick_source and not initial_attempt_expired():
                     phase[0]="SAFE_JOB_NAVIGATION"
-                    triggered=self._job_page_search_trigger(page)
+                    triggered=self._job_page_search_trigger(page,timeout_ms=int(remaining_initial_attempt_seconds()*1000))
                     if triggered:
                         safe_navigation_taken=True
                         page.wait_for_timeout(2000)
@@ -325,17 +561,19 @@ class GenericApiDetector:
                 # bounded by a hard maximum deadline.  A HIGH-confidence source
                 # found early still exits quickly instead of idling.
                 network_observation_started=perf_counter()
-                if not _expired():
+                if not initial_attempt_expired():
                     observation_policy=wait_for_activity_quiet(
                         page,activity_clock,dom_snapshot,
-                        has_high_confidence_source=lambda:bool(next((c for c in self._rank(observations) if self._reliable_list_source(c)),None)))
+                        has_high_confidence_source=lambda:bool(next((c for c in self._rank(observations) if self._reliable_list_source(c)),None)),
+                        deadline_check=initial_attempt_expired,
+                        max_observation_ms=min(MAX_OBSERVATION_MS,int(remaining_initial_attempt_seconds()*1000)))
                     summary.observation_policy=observation_policy
                     if observation_policy["reason"]=="MAX_OBSERVATION_DEADLINE":warnings.append("OBSERVATION_MAX_DEADLINE")
-                    if not observations:wait_for_readiness_consensus(page,lambda:len(observations),timeout_ms=min(self.timeout_ms,15000))
+                    if not observations:wait_for_readiness_consensus(page,lambda:len(observations),timeout_ms=min(self.timeout_ms,15000,int(remaining_initial_attempt_seconds()*1000)),deadline_check=initial_attempt_expired)
                     elif not any("job-semantic" in str(getattr(x,"url","")) for x in observations) and not observation_policy["job_semantic_requests"]:
                         # No job-semantic request has been seen yet: give a bounded
                         # extra chance for slow SPA chains (generic, not site-tied).
-                        wait_for_readiness_consensus(page,lambda:len(observations),timeout_ms=3000)
+                        wait_for_readiness_consensus(page,lambda:len(observations),timeout_ms=min(3000,int(remaining_initial_attempt_seconds()*1000)),deadline_check=initial_attempt_expired)
                 timed("network_observation",network_observation_started)
                 # STEP 53E: a quiet SPA that had activity but never triggered a
                 # job request may be stuck during boot.  This is intentionally
@@ -344,12 +582,13 @@ class GenericApiDetector:
                 # state so stale first-attempt candidates cannot affect ranking.
                 initial_attempt_rank=self._rank(observations)
                 initial_attempt_source=next((c for c in initial_attempt_rank if self._reliable_list_source(c)),None)
+                retry_source=None
                 # Some SPAs finish their initial route transition only after
                 # hydration.  Retry only when the first attempt did not
                 # actually navigate and no credible source has appeared.
-                if not initial_attempt_source and not safe_navigation_taken and not _expired():
+                if not initial_attempt_source and not safe_navigation_taken and not initial_attempt_expired():
                     phase[0]="SAFE_JOB_NAVIGATION"
-                    triggered=self._job_page_search_trigger(page)
+                    triggered=self._job_page_search_trigger(page,timeout_ms=int(remaining_initial_attempt_seconds()*1000))
                     if triggered:
                         safe_navigation_taken=True
                         page.wait_for_timeout(2000)
@@ -372,6 +611,22 @@ class GenericApiDetector:
                     environment_failure=boot_environment_failure,
                 )
                 boot_attempts.append({"attempt":1,"state":boot_decision.state,"reason":boot_decision.reason,**boot_decision.evidence,"source_found":bool(initial_attempt_source)})
+                # The reserve is conditional: once this boot state cannot use
+                # recovery, return its unused share to ordinary observation.
+                # This preserves the full shared source budget for healthy,
+                # slow, or no-activity pages while never creating a second one.
+                if (not reload_allowed(boot_decision,boot_reload_count) and (initial_attempt_expired() or observation_policy.get("reason")=="MAX_OBSERVATION_DEADLINE")
+                        and not _expired() and not initial_attempt_source):
+                    observation_policy=wait_for_activity_quiet(
+                        page,activity_clock,dom_snapshot,
+                        has_high_confidence_source=lambda:bool(next((c for c in self._rank(observations) if self._reliable_list_source(c)),None)),
+                        deadline_check=source_expired,
+                        max_observation_ms=min(MAX_OBSERVATION_MS,int(remaining_source_seconds()*1000)))
+                    summary.observation_policy=observation_policy
+                recovery_trace={"recovery_trigger_attempted":False,"recovery_trigger_result":"NOT_ATTEMPTED","clicked_text":[],
+                                "url_before":None,"url_after":None,"remaining_budget_ms_before_reload":int(remaining_source_seconds()*1000),
+                                "remaining_budget_ms_after_reload":None,"recovery_observation_budget_ms":0,
+                                "recovery_reserve_ms":recovery_reserve_ms}
                 if reload_allowed(boot_decision,boot_reload_count) and not _expired():
                     boot_reload_count+=1;warnings.append("BOOT_STALL_RELOAD_ATTEMPTED")
                     # Attempt isolation: listeners remain attached but write only
@@ -379,15 +634,21 @@ class GenericApiDetector:
                     observations.clear();inventory.clear();summary=NetworkSummary();activity_clock=ActivityClock();domcontentloaded=False
                     phase[0]="BOOT_RECOVERY_RELOAD"
                     try:
-                        page.reload(wait_until="domcontentloaded",timeout=self.timeout_ms)
+                        page.reload(wait_until="domcontentloaded",timeout=max(1,min(self.timeout_ms,self._RECOVERY_RELOAD_ALLOWANCE_MS,int(remaining_source_seconds()*1000))))
                         domcontentloaded=True
                         phase[0]="BOOT_RECOVERY_HYDRATION"
-                        hydration=wait_for_hydration(page,lambda:len(observations))
+                        recovery_started=perf_counter();hydration=wait_for_hydration(page,lambda:len(observations),timeout_ms=min(self._RECOVERY_HYDRATION_ALLOWANCE_MS,int(remaining_source_seconds()*1000)),deadline_check=source_expired);debug_trace("TIMING_TRACE RECOVERY_HYDRATION_END",{"start_t":recovery_started-clock,"end_t":perf_counter()-clock,"result":hydration})
                         if not hydration["stabilized"]:warnings.append("BOOT_RECOVERY_HYDRATION_TIMEOUT")
                         if not _expired():
+                            recovery_trace["remaining_budget_ms_after_reload"]=int(remaining_source_seconds()*1000)
+                            recovery_trace.update(self._recovery_trigger(page,observations,source_deadline))
+                            recovery_observation_budget_ms=min(MAX_OBSERVATION_MS,int(remaining_source_seconds()*1000))
+                            recovery_trace["recovery_observation_budget_ms"]=recovery_observation_budget_ms
                             observation_policy=wait_for_activity_quiet(
                                 page,activity_clock,dom_snapshot,
-                                has_high_confidence_source=lambda:bool(next((c for c in self._rank(observations) if self._reliable_list_source(c)),None)))
+                                has_high_confidence_source=lambda:bool(next((c for c in self._rank(observations) if self._reliable_list_source(c)),None)),
+                                deadline_check=source_expired,
+                                max_observation_ms=recovery_observation_budget_ms)
                             summary.observation_policy=observation_policy
                     except Exception as exc:
                         warnings.append("BOOT_STALL_RELOAD_FAILED")
@@ -412,7 +673,20 @@ class GenericApiDetector:
                         boot_attempts.append({"attempt":2,"state":retry_decision.state,"reason":retry_decision.reason,**retry_decision.evidence,"source_found":bool(retry_source)})
                         if retry_decision.state=="QUIET_BOOT_STALL":warnings.append("BOOT_STALL_UNRECOVERED")
                         elif retry_source:warnings.append("BOOT_STALL_RECOVERED")
-                summary.boot_recovery={"reload_count":boot_reload_count,"attempts":boot_attempts,"max_reloads":1}
+                summary.boot_recovery={"reload_count":boot_reload_count,"attempts":boot_attempts,"max_reloads":1,**recovery_trace}
+                # A trustworthy initial list proves we are on a recruitment
+                # page, but not that its currently selected tab is the whole
+                # site.  Before taking the fast exit, try only explicit
+                # recruitment-type controls and let normal response scoring
+                # decide whether each switch is a valid additional scope.
+                effective_scope_source=self._effective_list_source(observations,retry_source,initial_attempt_source)
+                def _source_trace(candidate):
+                    if candidate is None:return None
+                    values=candidate.safe_request_values if candidate.method=="POST" else candidate.query_params
+                    return {"endpoint":candidate.url,"method":candidate.method,"nature":values.get("nature"),"project_id":values.get("project_id")}
+                debug_trace("SCOPE_TRACE ENTER_SCOPE_ENUMERATION",{"initial_attempt_source":bool(initial_attempt_source),"retry_source":bool(retry_source),"effective_scope_source":bool(effective_scope_source),"effective_source":_source_trace(effective_scope_source),"current_url":getattr(page,"url",url),"source_elapsed_seconds":perf_counter()-clock,"enter":bool(effective_scope_source)})
+                if effective_scope_source:
+                    self._enumerate_recruitment_scopes(page,url,observations,phase,self._scope_enumeration_expired(),social_trace=social_trace)
                 # Stage 1 has its answer once the observation policy found a
                 # reliable list source.  DOM/detail enrichment below is useful
                 # only after source discovery and must never turn a quick source
@@ -428,6 +702,9 @@ class GenericApiDetector:
                     # (structured metadata / page title) before bailing out.
                     if not company:
                         try:company=extract_company(page)
+                        except Exception:pass
+                    if page_title is None:
+                        try:page_title=page.title() or None
                         except Exception:pass
                     raise _SourceDiscoveryComplete()
                 # STEP78: SSR states are present in the first HTML response —
@@ -476,6 +753,9 @@ class GenericApiDetector:
                 inventory.extend(embedded_sources(page,url))
                 entries=recruitment_entries(page,url)
                 company=extract_company(page)
+                if page_title is None:
+                    try:page_title=page.title() or None
+                    except Exception:pass
                 text=page.locator("body").inner_text(timeout=3000)[:20000]
                 timed("serialized_state_script_inspection",serialized_state_started)
                 if terminal_mode:
@@ -689,6 +969,8 @@ class GenericApiDetector:
         list_observations=[o for o in observations if o.phase!="DETAIL"]
         detail_observations=[o for o in observations if o.phase=="DETAIL"]
         lists=self._rank(list_observations); details=[x for x in self._rank(detail_observations,True) if x.score>=self.threshold]
+        debug_trace("TIMING_TRACE DETECTOR_FINAL",{"t":perf_counter()-clock,"first_accepted_t":first_accepted_time[0],"expired":_expired(),"observation_count":len(observations)})
+        debug_trace("SCOPE_TRACE DETECTOR_FINAL_SCOPES",[{"endpoint":candidate.url,"method":candidate.method,"identity":(candidate.safe_request_values if candidate.method=="POST" else candidate.query_params),"nature":(candidate.safe_request_values if candidate.method=="POST" else candidate.query_params).get("nature"),"project_id":(candidate.safe_request_values if candidate.method=="POST" else candidate.query_params).get("project_id"),"total":candidate.observed_total,"phase":candidate.observed_phase} for candidate in lists])
         timed("candidate_validation",candidate_validation_started)
         rejected=[]
         seen_rejected=set()
@@ -707,8 +989,19 @@ class GenericApiDetector:
         present={x.source_type for x in inventory}
         for source_type in ("NETWORK_JSON","GRAPHQL","SERIALIZED_STATE","DOM_LIST","IFRAME","EMBEDDED_WIDGET"):
             if source_type not in present:inventory.append(CandidateSource(source_type=source_type,status="NONE",evidence=["NONE"]))
-        probable=lists[0] if lists and lists[0].score>=self.threshold else None
-        if probable and probable.observed_company_count>1:company=None
+        probable=self._accepted_list_source(list_observations)
+        # Multi-company protection: no single job-level employer may be
+        # promoted to the site identity. Instead of discarding identity
+        # outright, hosted multi-company portals (group recruitment sites)
+        # get one site-level resolution attempt from evidence discovery
+        # already holds; anything unresolved stays None (fail closed).
+        site_identity=None
+        if probable and probable.observed_company_count>1:
+            company=None
+            site_identity=resolve_site_company(url,observations,lists,page_title)
+            if site_identity:
+                company=site_identity.company
+                debug_trace("SITE_IDENTITY_RESOLVED",{"host":urlsplit(url).hostname,"company":site_identity.company,"evidence":site_identity.evidence})
         elif not company and probable:
             company=probable.sample_job_hint.get("company_name")
             if not company and isinstance(probable.sample_job_hint.get("company"),dict):company=probable.sample_job_hint["company"].get("name")
@@ -742,7 +1035,7 @@ class GenericApiDetector:
         classification="UNKNOWN_ATS" if probable and probable_is_job else ("RECRUITMENT_PORTAL" if entries else ("NON_JOB_DESTINATION" if not inventory else "RECRUITMENT_PORTAL"))
         profile=profile_from_discovery(DiscoveryResult(source_url=url,status=status,probable_list_api=probable,detected_pagination=pagination,detected_scope=self._scope(url,observations,text if 'text' in locals() else ""),candidate_list_apis=lists[:10])) if probable and probable_is_job else None
         finalization_started=perf_counter();result=DiscoveryResult(source_url=url,status=status,candidate_list_apis=lists[:10],candidate_detail_apis=details[:10],probable_list_api=probable,rejected_candidates=rejected[:20],
-            detected_pagination=pagination,detected_scope=self._scope(url,observations,text if 'text' in locals() else ""),network_summary=summary,dom_fallback=dom,detail_dom=detail_dom,company=company,tool_version=__version__,warnings=warnings,
+            detected_pagination=pagination,detected_scope=self._scope(url,observations,text if 'text' in locals() else ""),network_summary=summary,dom_fallback=dom,detail_dom=detail_dom,company=company,site_company_evidence=(site_identity.evidence if site_identity else []),tool_version=__version__,warnings=warnings,
             source_inventory=inventory,visible_total_evidence=[VisibleTotalEvidence(**x) for x in total_evidence],visible_total_conflict=total_conflict,failure_classification=terminal_failure,
             list_containers=[container] if 'container' in locals() and container else [],page_type=page_type,recruitment_entries=entries,ats_classification=classification,ats_profile=profile,runtime_source=runtime_source,
             internal_navigation_trace=internal_trace,

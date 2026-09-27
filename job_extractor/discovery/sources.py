@@ -1,4 +1,5 @@
 import re
+from time import perf_counter
 from urllib.parse import urljoin,urlsplit
 from job_extractor.discovery.models import CandidateSource,RecruitmentAction,RecruitmentEntry
 
@@ -12,7 +13,7 @@ ENTRY_TERMS={
 NEGATIVE_TERMS=("news","article","brand","privacy","login","event","marketing","tracking","analytics","socialresponsibility","社会责任","新闻","文章","活动")
 
 
-def trigger_job_page_search(page, node_selector: str = 'a,button,[role="button"],[role="menuitem"],[data-route],li') -> list[str]:
+def trigger_job_page_search(page, node_selector: str = 'a,button,[role="button"],[role="menuitem"],[data-route],li', *, timeout_ms: int | None = None, settle_ms: int = 2000) -> list[str]:
     """Activate one visible, job-semantic control without portal-specific rules."""
     script="""()=>Array.from(document.querySelectorAll('a,button,[role="button"],[role="menuitem"],[data-route],li')).map((n,i)=>({i,text:(n.innerText||n.getAttribute('aria-label')||'').trim().replace(/\\s+/g,' '),href:(n.getAttribute&&(n.getAttribute('href')||n.getAttribute('data-route')))||'',active:n.getAttribute('aria-current')==='page'||/(^|\\s)is-active(\\s|$)|(^|\\s)active(\\s|$)/.test(n.className||'')}))"""
     try:
@@ -32,11 +33,21 @@ def trigger_job_page_search(page, node_selector: str = 'a,button,[role="button"]
             continue
         score=sum(4 for term in positive if term.lower() in value)
         if score>0:ranked.append((score,node))
+    deadline = perf_counter() + max(0, timeout_ms or 0) / 1000 if timeout_ms is not None else None
+    def remaining_ms() -> int:
+        if deadline is None:
+            return 3000
+        return max(0, int((deadline - perf_counter()) * 1000))
     ranked.sort(key=lambda item:-item[0]);clicked=[]
     for _score,node in ranked[:1]:
         try:
-            page.locator(node_selector).nth(int(node["i"])).click(timeout=3000)
-            page.wait_for_timeout(2000);clicked.append(str(node.get("text"))[:40])
+            available = remaining_ms()
+            if available <= 0: break
+            page.locator(node_selector).nth(int(node["i"])).click(timeout=min(3000, available))
+            available = remaining_ms()
+            if available > 0:
+                page.wait_for_timeout(min(settle_ms, available))
+            clicked.append(str(node.get("text"))[:40])
         except Exception:
             pass
     return clicked
