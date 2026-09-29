@@ -372,6 +372,26 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
                                      auto_stage=auto_stage,
                                      jobs_count=exc.jobs_count)
         return recovered
+    except httpx.HTTPError as exc:
+        # N8.3 hotfix: a transport-level rejection of the PASTED cURL itself
+        # (HTTPStatusError/timeout/connection) means the cURL could not be
+        # validated by replay — classified as MANUAL_CURL_INVALID with a
+        # friendly render. Never escalates to the browser-assisted stage:
+        # only a proven "current page valid, pagination rejected" outcome
+        # (PageReplayRejected, which requires jobs>=1 from the initial
+        # request) may offer HAR import.
+        status=getattr(getattr(exc,"response",None),"status_code",None)
+        code=(f"HTTP_{status}" if isinstance(status,int)
+              else "TIMEOUT" if isinstance(exc,httpx.TimeoutException)
+              else "CONNECTION_ERROR")
+        stage=4 if detail_started else 2
+        reporter.stage_fail(stage,code); reporter.failed_summary(stage,code)
+        typer.echo("无法从这条 cURL 识别有效岗位数据。")
+        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                curl_failure_stage="LIST",
+                                curl_failure_code="MANUAL_CURL_INVALID",
+                                curl_failure_reason=code)
+        return False
     except ManualCurlResponseError as exc:
         stage=4 if detail_started else 2; reporter.stage_fail(stage,exc.code); reporter.failed_summary(stage,exc.code)
         _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage=stage,curl_failure_code=exc.code,curl_failure_reason=translate_reason(exc.code))
