@@ -108,11 +108,86 @@ def test_cli_initial_http_400_is_manual_curl_invalid_not_har(monkeypatch, tmp_pa
     monkeypatch.setattr(cli, "_write_fallback_failure", lambda *a, **k: None)
 
     result = CliRunner().invoke(app, ["https://example.com/jobs"], input=(
-        "\ncurl 'https://careers.example.com/api/recruit/position/list'\nEND\n"))
+        "\ncurl 'https://careers.example.com/api/recruit/position/list'\nEND\n3\n"))
     assert result.exit_code == 0 and "Traceback" not in result.output
     assert "无法从这条 cURL 识别有效岗位数据。" in result.output
-    assert "请输入 HAR 文件路径" not in result.output
-    assert "浏览器辅助采集" not in result.output
+    assert "该请求无法在 Job Extractor 中重放。" in result.output
+    assert "[1] 重新粘贴 cURL" in result.output
+    assert "[2] 使用浏览器辅助采集" in result.output
+    assert "[3] 退出" in result.output
+    assert "请输入 HAR 文件路径" not in result.output  # exit chosen: no HAR prompt
+
+
+def test_cli_initial_http_400_retry_reprompts_curl(monkeypatch, tmp_path):
+    """Choice [1] re-prompts the cURL paste and runs the new request."""
+    monkeypatch.setattr(cli, "DISCOVERY_OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr("job_extractor.adapters.generic.GenericAdapter.discover",
+                        lambda self, url: DiscoveryResult(source_url=url, status="NOT_FOUND"))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    attempts = []
+
+    def reject_first_then_succeed(list_curl, detail_curl, **kwargs):
+        attempts.append(list_curl)
+        if len(attempts) == 1:
+            raise httpx.HTTPStatusError(
+                "Client error '400 Bad Request'",
+                request=httpx.Request("POST", "https://careers.example.com/api/recruit/position/list"),
+                response=httpx.Response(status_code=400, request=httpx.Request(
+                    "POST", "https://careers.example.com/api/recruit/position/list")))
+        from job_extractor.manual_curl import ManualCurlResult
+        from job_extractor.models import Job
+        job = Job(job_id="1", job_title="岗位", source_url="https://x.test",
+                  full_jd="职责\n要求", responsibilities=["职责"],
+                  requirements=["要求"])
+        return ManualCurlResult("data", 1, 22, "HIGH", [job], 0, 1, 1, [],
+                                "COMPLETE", "TOTAL_REACHED", 0.1, 1)
+    monkeypatch.setattr(cli, "run_manual_curl", reject_first_then_succeed)
+    monkeypatch.setattr(cli, "_write_fallback_failure", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "generate_and_render_reports", lambda *a, **k: "ok")
+
+    result = CliRunner().invoke(app, ["https://example.com/jobs"], input=(
+        "\ncurl 'https://careers.example.com/api/recruit/position/list'\nEND\n1\n"
+        "curl 'https://careers.example.com/api/recruit/position/list'\nEND\n"))
+    assert result.exit_code == 0 and "Traceback" not in result.output
+    assert len(attempts) == 2
+    assert "完成 ✓" in result.output or "岗位数：1" in result.output
+
+
+def test_cli_initial_http_400_browser_assist_enters_har(monkeypatch, tmp_path):
+    """Choice [2] enters the existing HAR import flow (user-initiated)."""
+    from job_extractor.har_importer import HarImportResult
+    from job_extractor.models import CollectionMetrics, CollectionResult, Job
+    monkeypatch.setattr(cli, "DISCOVERY_OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr("job_extractor.adapters.generic.GenericAdapter.discover",
+                        lambda self, url: DiscoveryResult(source_url=url, status="NOT_FOUND"))
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(cli, "run_manual_curl", lambda *a, **kw: (_ for _ in ()).throw(
+        httpx.HTTPStatusError(
+            "Client error '400 Bad Request'",
+            request=httpx.Request("POST", "https://careers.example.com/api/recruit/position/list"),
+            response=httpx.Response(status_code=400, request=httpx.Request(
+                "POST", "https://careers.example.com/api/recruit/position/list")))))
+    monkeypatch.setattr(cli, "generate_and_render_reports", lambda *a, **k: "ok")
+    metrics = CollectionMetrics(pages_requested=1, pages_succeeded=1,
+                                raw_rows=2, unique_jobs=2)
+    outcome = HarImportResult(result=CollectionResult(
+        source_url="https://x.test", platform="har_import", metrics=metrics,
+        total_expected=2, total_fetched=2, total_unique=2, status="COMPLETE",
+        jobs=[Job(job_id="1", job_title="岗位", source_url="https://x.test")]),
+        metrics={"raw_rows": 2, "unique_jobs": 2, "duplicate_jobs": 0,
+                 "har_entries": 1, "matched_candidate_responses": 1,
+                 "usable_responses": 1, "pages_observed": 1,
+                 "failed_responses": 0, "malformed_json_responses": 0})
+    monkeypatch.setattr(cli, "import_har", lambda path: outcome)
+    har = tmp_path / "fresh.har"
+    har.write_text("{}", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["https://example.com/jobs"], input=(
+        "\ncurl 'https://careers.example.com/api/recruit/position/list'\nEND\n2\n1\n"
+        + str(har) + "\n"))
+    assert result.exit_code == 0 and "Traceback" not in result.output
+    assert "HAR 导入成功" in result.output
+    assert "已恢复：2 raw / 2 unique" in result.output
 
 
 def test_pagination_replay_rejected_cli_still_offers_har(monkeypatch, tmp_path):

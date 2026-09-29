@@ -290,20 +290,25 @@ def _run_har_fallback(url: str, reporter: ProgressReporter, har_path: str,
 
 def _har_fallback_menu(url: str, reporter: ProgressReporter, *,
                        auto_code: str, auto_stage: str,
-                       jobs_count: int) -> bool:
-    """cURL read the current page but pagination cannot continue safely:
-    offer the browser-assisted HAR fallback (or a clean exit)."""
+                       jobs_count: int | None = None,
+                       curl_failure_code: str = "CURL_PAGINATION_NOT_REPLAYABLE") -> bool:
+    """Browser-assisted HAR fallback (or a clean exit).
+
+    jobs_count set = proven "current page valid, pagination rejected"
+    (recommended path). jobs_count None = user-initiated upgrade from a
+    MANUAL_CURL_INVALID outcome (user choice, not a system reclassification)."""
     typer.echo("")
-    typer.echo(f"当前 cURL 可以读取岗位（{jobs_count} 条），但该站点的分页请求"
-               "使用动态验证信息，无法安全使用同一请求继续翻页。")
-    typer.echo("可切换到“浏览器辅助采集”。")
+    if jobs_count is not None:
+        typer.echo(f"当前 cURL 可以读取岗位（{jobs_count} 条），但该站点的分页请求"
+                   "使用动态验证信息，无法安全使用同一请求继续翻页。")
+        typer.echo("可切换到“浏览器辅助采集”。")
     answer=typer.prompt("[1] 导入 HAR\n[2] 退出\n选择 [2]", default="2", show_default=False).strip().lower()
     if answer=="2":
         typer.echo("已结束。")
         _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
                                 curl_failure_stage="LIST",
-                                curl_failure_code="CURL_PAGINATION_NOT_REPLAYABLE",
-                                curl_failure_reason="CURL_PAGINATION_NOT_REPLAYABLE")
+                                curl_failure_code=curl_failure_code,
+                                curl_failure_reason=curl_failure_code)
         return False
     har_path=typer.prompt("请输入 HAR 文件路径", default="", show_default=False).strip()
     if not har_path:
@@ -360,62 +365,97 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
             detail=data.get("detail") or {}
             safe={key:detail.get(key) for key in ("campaign_source_url","campaign_context","browser_factory","browser_launch_elapsed","resolver_state_id","pattern_locked","candidate_url","navigation_wait","navigation_elapsed","final_page_url","body_text_length","ready_state","jd_heading_found","responsibilities_found","requirements_found","failure_stage","failure_code","failure_reason") if key in detail}
             typer.echo(f"DETAIL DEBUG #{data.get('post_id')} {data.get('title')}: {safe}")
-    try:
-        manual=run_manual_curl(list_curl,None,max_jobs=None,progress_callback=observe,
-                               detail_browser_factory=_detail_page_factory(reporter),
-                               detail_page_url=url,campaign_context=url)
-    except PageReplayRejected as exc:
-        stage=4 if detail_started else 2
-        reporter.stage_fail(stage,exc.code); reporter.failed_summary(stage,exc.code)
-        typer.echo("cURL 已读取当前页，但无法继续安全分页")
-        recovered=_har_fallback_menu(url,reporter,auto_code=auto_code,
-                                     auto_stage=auto_stage,
-                                     jobs_count=exc.jobs_count)
-        return recovered
-    except httpx.HTTPError as exc:
-        # N8.3 hotfix: a transport-level rejection of the PASTED cURL itself
-        # (HTTPStatusError/timeout/connection) means the cURL could not be
-        # validated by replay — classified as MANUAL_CURL_INVALID with a
-        # friendly render. Never escalates to the browser-assisted stage:
-        # only a proven "current page valid, pagination rejected" outcome
-        # (PageReplayRejected, which requires jobs>=1 from the initial
-        # request) may offer HAR import.
-        status=getattr(getattr(exc,"response",None),"status_code",None)
-        code=(f"HTTP_{status}" if isinstance(status,int)
-              else "TIMEOUT" if isinstance(exc,httpx.TimeoutException)
-              else "CONNECTION_ERROR")
-        stage=4 if detail_started else 2
-        reporter.stage_fail(stage,code); reporter.failed_summary(stage,code)
-        typer.echo("无法从这条 cURL 识别有效岗位数据。")
-        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
-                                curl_failure_stage="LIST",
-                                curl_failure_code="MANUAL_CURL_INVALID",
-                                curl_failure_reason=code)
-        return False
-    except ManualCurlResponseError as exc:
-        stage=4 if detail_started else 2; reporter.stage_fail(stage,exc.code); reporter.failed_summary(stage,exc.code)
-        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage=stage,curl_failure_code=exc.code,curl_failure_reason=translate_reason(exc.code))
-        return False
-    except DetailCurlRequired as exc:
-        manual=_detail_curl_menu(url,reporter,list_curl,exc,observe)
-        if manual is None: return False
-    except ValueError as exc:
-        if str(exc)!="DETAIL_CURL_REQUIRED": raise
-        detail_curl=_read_curl_block("Detail / JD cURL")
-        if detail_curl is None:
-            typer.echo("已取消 cURL 兜底。")
-            _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="DETAIL",curl_failure_code="CANCEL",curl_failure_reason="CANCEL")
+    manual=None
+    while True:
+        try:
+            manual=run_manual_curl(list_curl,None,max_jobs=None,progress_callback=observe,
+                                   detail_browser_factory=_detail_page_factory(reporter),
+                                   detail_page_url=url,campaign_context=url)
+            break
+        except PageReplayRejected as exc:
+            stage=4 if detail_started else 2
+            reporter.stage_fail(stage,exc.code); reporter.failed_summary(stage,exc.code)
+            typer.echo("cURL 已读取当前页，但无法继续安全分页")
+            recovered=_har_fallback_menu(url,reporter,auto_code=auto_code,
+                                         auto_stage=auto_stage,
+                                         jobs_count=exc.jobs_count)
+            return recovered
+        except httpx.HTTPError as exc:
+            # N8.3: a transport-level rejection of the PASTED cURL itself
+            # (HTTPStatusError/timeout/connection) means the cURL could not be
+            # validated by replay — classified as MANUAL_CURL_INVALID. The error
+            # code semantics never change, but the CLI offers a user-initiated
+            # upgrade path: retry the cURL, switch to browser-assisted
+            # collection, or exit. Only the proven "current page valid,
+            # pagination rejected" outcome (PageReplayRejected, requiring
+            # jobs>=1 from the initial request) treats Browser Assist as the
+            # recommended path; here it is purely user-initiated.
+            status=getattr(getattr(exc,"response",None),"status_code",None)
+            code=(f"HTTP_{status}" if isinstance(status,int)
+                  else "TIMEOUT" if isinstance(exc,httpx.TimeoutException)
+                  else "CONNECTION_ERROR")
+            stage=4 if detail_started else 2
+            reporter.stage_fail(stage,code); reporter.failed_summary(stage,code)
+            typer.echo("无法从这条 cURL 识别有效岗位数据。")
+            if detail_started or not _stdin_is_interactive():
+                _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                        curl_failure_stage="LIST",
+                                        curl_failure_code="MANUAL_CURL_INVALID",
+                                        curl_failure_reason=code)
+                return False
+            typer.echo("该请求无法在 Job Extractor 中重放。"
+                       "你可以重新复制 cURL，或改用浏览器辅助采集。")
+            answer=typer.prompt("[1] 重新粘贴 cURL\n[2] 使用浏览器辅助采集\n[3] 退出\n选择 [1]",
+                                default="1", show_default=False).strip().lower()
+            if answer=="2":
+                return _har_fallback_menu(url,reporter,auto_code=auto_code,
+                                          auto_stage=auto_stage, jobs_count=None,
+                                          curl_failure_code="MANUAL_CURL_INVALID")
+            if answer=="3":
+                typer.echo("已结束。")
+                _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                        curl_failure_stage="LIST",
+                                        curl_failure_code="MANUAL_CURL_INVALID",
+                                        curl_failure_reason=code)
+                return False
+            text=_read_curl_block("List cURL")
+            if text is None:
+                typer.echo("已取消 cURL 兜底。")
+                _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="LIST",curl_failure_code="CANCEL",curl_failure_reason="CANCEL")
+                return False
+            try:
+                parse_curl(text); list_curl=text
+            except Exception as parse_error:
+                typer.echo(f"cURL 解析失败\n原因：{parse_error}")
+                _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="LIST",curl_failure_code="PARSE_FAILED",curl_failure_reason="LIST_CURL_PARSE_FAILED")
+                return False
+            continue
+        except ManualCurlResponseError as exc:
+            stage=4 if detail_started else 2; reporter.stage_fail(stage,exc.code); reporter.failed_summary(stage,exc.code)
+            _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage=stage,curl_failure_code=exc.code,curl_failure_reason=translate_reason(exc.code))
             return False
-        try: parse_curl(detail_curl)
-        except Exception as parse_error:
-            typer.echo(f"cURL 解析失败\n原因：{parse_error}")
-            _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="DETAIL",curl_failure_code="PARSE_FAILED",curl_failure_reason="DETAIL_CURL_PARSE_FAILED")
+        except DetailCurlRequired as exc:
+            manual=_detail_curl_menu(url,reporter,list_curl,exc,observe)
+            if manual is None: return False
+            break
+        except ValueError as exc:
+            if str(exc)!="DETAIL_CURL_REQUIRED": raise
+            detail_curl=_read_curl_block("Detail / JD cURL")
+            if detail_curl is None:
+                typer.echo("已取消 cURL 兜底。")
+                _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="DETAIL",curl_failure_code="CANCEL",curl_failure_reason="CANCEL")
+                return False
+            try: parse_curl(detail_curl)
+            except Exception as parse_error:
+                typer.echo(f"cURL 解析失败\n原因：{parse_error}")
+                _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="DETAIL",curl_failure_code="PARSE_FAILED",curl_failure_reason="DETAIL_CURL_PARSE_FAILED")
+                return False
+            manual=run_manual_curl(list_curl,detail_curl,max_jobs=None,progress_callback=observe)
+            break
+        except Exception as exc:
+            stage=4 if detail_started else 2; reporter.stage_fail(stage,str(exc)); reporter.failed_summary(stage,str(exc))
+            _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="DETAIL" if detail_started else "LIST",curl_failure_code=type(exc).__name__,curl_failure_reason=str(exc))
             return False
-        manual=run_manual_curl(list_curl,detail_curl,max_jobs=None,progress_callback=observe)
-    except Exception as exc:
-        stage=4 if detail_started else 2; reporter.stage_fail(stage,str(exc)); reporter.failed_summary(stage,str(exc))
-        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="DETAIL" if detail_started else "LIST",curl_failure_code=type(exc).__name__,curl_failure_reason=str(exc))
-        return False
     unified=manual_result_to_collection_result(manual,url); unified.enrichment["fallback"]=_fallback_audit(url,auto_code,auto_stage)
     reporter.set_company(unified.company)
     if unified.metrics.jd_strategy=="LIST_SUFFICIENT":
