@@ -80,12 +80,6 @@
   };
   const sameSet = (a, b) =>
     a.size === b.size && [...a].every((v) => b.has(v));
-  const stableSample = (sampleFn, comparePrev) => {
-    const first = sampleFn();
-    if (comparePrev && sameSet(first, comparePrev)) return null;
-    const second = sampleFn();
-    return sameSet(first, second) ? first : null;
-  };
 
   // ---- explicit user resume control ----
   let resumeResolver = null;
@@ -240,12 +234,98 @@
         continue;
       }
       const settled = await waitForPageRecovery(expectedPage, prevIds);
-      if (settled) return true;
+      if (settled) {
+        console.log("verification/page recovered");
+        console.log("resuming automation");
+        return true;
+      }
       console.log("PAGE_RECOVERY_TIMEOUT page " + expectedPage);
       console.log("请再次完成验证后输入 jobHelperResume() 重试，" +
         "或调用 jobHelperStop() 结束。");
     }
   };
+
+  // ---- Step 1.5: initial-page warmup for HAR capture ----
+  // Network recording may start after Page 1 already loaded, which would
+  // leave the HAR without Page 1. Re-trigger the current page with plain
+  // pagination clicks only (2→1 round-trip when starting on page 1, or a
+  // navigate-back when starting elsewhere). Verification during warmup
+  // enters the same human-resume mechanism; pagesVisited is untouched.
+  const waitPageStable = async (expectedPage, prevIds) => {
+    const deadline = Date.now() + MAX_SETTLE_MS;
+    while (Date.now() < deadline) {
+      await sleep(STABILITY_POLL_MS);
+      if (activePage() !== expectedPage) continue;
+      const ids = visibleIds();
+      if (ids.size === 0 || sameSet(ids, prevIds)) continue;
+      if (sameSet(ids, visibleIds())) return true;
+    }
+    return false;
+  };
+  // Warmup stabilization shares the human-resume mechanism: if the page
+  // transition triggers the site's verification, the user completes it and
+  // calls jobHelperResume(); the resume re-triggers the page and warmup
+  // continues afterwards.
+  const ensureStableWithResume = async (expectedPage, prevIds) => {
+    if (await waitPageStable(expectedPage, prevIds)) return true;
+    console.log("WARMUP_PAGE_UNSTABLE page " + expectedPage);
+    const recovered = await humanVerificationRecovery(expectedPage, prevIds);
+    if (!recovered) return false;
+    return waitPageStable(expectedPage, prevIds);
+  };
+  const warmupInitialPage = async () => {
+    const startingPage = activePage();
+    if (startingPage === null) {
+      console.log("WARMUP_SKIPPED page number not detected");
+      return;
+    }
+    const startIds = visibleIds();
+    if (startingPage !== 1) {
+      console.log("navigating back to page 1 for HAR capture");
+      if (!clickPageItem(1)) {
+        console.log("WARMUP_SKIPPED cannot navigate back to page 1");
+        return;
+      }
+      if (await ensureStableWithResume(1, startIds)) {
+        console.log("initial page refreshed for HAR capture");
+      } else {
+        console.log("WARMUP_INCOMPLETE page 1 did not stabilize");
+      }
+      return;
+    }
+    if (nextDisabled()) {
+      console.log("single page: no warmup round-trip needed");
+      return;
+    }
+    console.log("refreshing page 1 for HAR capture (page 1 -> 2 -> 1)");
+    if (!clickPageItem(2)) {
+      console.log("WARMUP_SKIPPED cannot click page 2");
+      return;
+    }
+    if (!(await ensureStableWithResume(2, startIds))) {
+      console.log("WARMUP_INCOMPLETE page 2 did not stabilize");
+      return;
+    }
+    // capture the page-2 list BEFORE returning to page 1: the previous-page
+    // reference for stabilization must be the page we are leaving
+    const page2Ids = visibleIds();
+    if (!clickPageItem(1)) {
+      console.log("WARMUP_SKIPPED cannot click page 1");
+      return;
+    }
+    if (await ensureStableWithResume(1, page2Ids)) {
+      console.log("initial page refreshed for HAR capture");
+    } else {
+      console.log("WARMUP_INCOMPLETE page 1 did not stabilize");
+    }
+  };
+
+  // ---- warmup: re-trigger Page 1 so the HAR captures it ----
+  try {
+    await warmupInitialPage();
+  } catch (error) {
+    console.log("WARMUP_SKIPPED " + (error && error.message ? error.message : error));
+  }
 
   // ---- Step 2: adaptive pagination via the official next control ----
   let pagesVisited = 0;
@@ -331,8 +411,6 @@
       const failedPage = activePage() ?? pageNo + 1;
       const recovered = await humanVerificationRecovery(failedPage, prevIds);
       if (recovered) {
-        console.log("verification/page recovered");
-        console.log("resuming automation");
         stuckAt = null;
       } else {
         break;

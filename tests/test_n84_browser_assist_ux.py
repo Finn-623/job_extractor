@@ -35,7 +35,7 @@ def test_page_replay_rejected_shows_browser_assist_main_menu(monkeypatch, tmp_pa
     assert "浏览器辅助采集" in result.output
     assert "[1] 开始浏览器辅助" in result.output
     assert "[2] 我已经有 HAR" in result.output
-    assert "3. 确保第一页请求已被记录" in result.output
+    assert "3. 助手会重新触发第一页请求（无需先刷新）" in result.output
     assert "当前 cURL 可以读取岗位（12 条）" in result.output
 
 

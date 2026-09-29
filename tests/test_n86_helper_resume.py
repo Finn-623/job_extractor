@@ -28,6 +28,34 @@ def test_resume_success_recovers_and_finishes_all_pages():
     proc = _run_scenario("resume-success")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "SCENARIO_ALL_PASS" in proc.stdout
+    assert "PASS initial page refreshed" in proc.stdout
+    assert "PASS pagesVisited not affected by warmup" in proc.stdout
+
+
+def test_warmup_round_trip_recreates_page_one_request():
+    proc = _run_scenario("resume-success")
+    out = proc.stdout
+    assert "PASS warmup round-trip logged" in out
+    assert "PASS initial page refreshed" in out
+    # the 2->1 clicks happen before the formal "page 1 ready"
+    assert "PASS page 1 request recreated before formal pagination" in out
+
+
+def test_warmup_verification_pauses_then_resumes_and_continues():
+    proc = _run_scenario("warmup-verification")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PASS warmup verification entered the human resume flow" in proc.stdout
+    assert "PASS verification/page recovered" in proc.stdout
+    assert "PASS resuming automation" in proc.stdout
+    assert "PASS initial page refreshed" in proc.stdout
+    assert "PASS pagesVisited not affected by warmup" in proc.stdout
+
+
+def test_single_page_no_warmup_round_trip():
+    proc = _run_scenario("single-page")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PASS single-page warmup skipped" in proc.stdout
+    assert "PASS one page visited" in proc.stdout
 
 
 def test_retry_failure_can_be_resumed_again_or_stopped_cleanly():

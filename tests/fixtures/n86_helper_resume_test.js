@@ -11,6 +11,12 @@ const helperSource = fs.readFileSync(
 const FAIL_PAGE = 10;
 const PAGE_SIZE = 50;
 const SCENARIO = process.argv[2] || "resume-success";
+if (SCENARIO === "single-page") { /* handled below via TOTAL_PAGES */ }
+// which pages fail their list request until the user completes verification
+const TOTAL_PAGES = SCENARIO === "single-page" ? 1 : 16;
+const VERIFIED_PAGES = (SCENARIO === "resume-success" || SCENARIO === "retry-failure")
+  ? { [FAIL_PAGE]: true }   // only page 10 needs verification (real PDD case)
+  : (SCENARIO === "warmup-verification" ? { 2: true, 10: true } : {});
 
 // ---- virtual clock: every sleep advances the clock and runs inline ----
 let vnow = 0;
@@ -19,9 +25,9 @@ const virtualDate = { now: () => vnow };
 // ---- fake DOM ----
 const state = {
   active: 1,
-  listed: 1,          // page whose job list is actually rendered
+  list: 1,
   verified: false,
-  window: null,
+  clicks: [],
 };
 
 function jobLink(page, index) {
@@ -41,7 +47,7 @@ function jobsFor(page) {
   }
   return out;
 }
-const LAST_PAGE = 16;
+const LAST_PAGE = TOTAL_PAGES;
 
 const paginationItem = (page) => ({
   textContent: String(page),
@@ -60,8 +66,9 @@ function goToPage(page) {
   // the site's own pagination click: it always advances the active page,
   // but the list request itself fails (54001) until the user completes
   // the site's own verification — then the request succeeds.
+  state.clicks.push(page);
   state.active = page;
-  if (page === FAIL_PAGE && !state.verified) {
+  if (VERIFIED_PAGES[page] && !state.verified) {
     state.listRequestFailed = true;   // success=false, errorCode=54001
     return;                            // list keeps showing the previous page
   }
@@ -72,10 +79,10 @@ function goToPage(page) {
 const nextEl = {
   get textContent() { return ""; },
   get classList() {
-    const last = state.active >= 16;
+    const last = state.active >= TOTAL_PAGES;
     return { contains: (c) => c === "rocket-pagination-next" || (last && c === "rocket-pagination-disabled") };
   },
-  getAttribute: () => (state.active >= 16 ? "true" : "false"),
+  getAttribute: () => (state.active >= TOTAL_PAGES ? "true" : "false"),
   offsetParent: {},
   querySelector: (sel) => (sel === "a" ? { click() { goToPage(state.active + 1); } } : null),
   click() { goToPage(state.active + 1); },
@@ -134,23 +141,49 @@ function expect(condition, label) {
 const pump = async () => new Promise((resolve) => setImmediate(resolve));
 
 async function main() {
+  if (SCENARIO === "single-page") {
+    let guard = 0;
+    while (!logs.some((l) => l === "done") && guard++ < 2000) await pump();
+    expect(logs.some((l) => l === "single page: no warmup round-trip needed"),
+      "single-page warmup skipped");
+    expect(logs.some((l) => l === "last page reached"), "last page reached");
+    expect(logs.some((l) => l === "total pages visited: 1"), "one page visited");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
   // ---- scenario 1: stability timeout pauses automation (no next click) ----
   let guard = 0;
   while (!logs.some((l) => l.includes("Automation is paused")) && guard++ < 300) {
     await pump();
   }
-  expect(logs.some((l) => l === "PAGE_STABILITY_TIMEOUT page " + (FAIL_PAGE - 1)),
-    "stability timeout reported at page " + (FAIL_PAGE - 1));
+  if (SCENARIO !== "warmup-verification") {
+    expect(logs.some((l) => l === "PAGE_STABILITY_TIMEOUT page " + (FAIL_PAGE - 1)),
+      "stability timeout reported at page " + (FAIL_PAGE - 1));
+  }
   expect(logs.some((l) => l.includes("Automation is paused")), "paused message");
   expect(logs.some((l) => l.includes("jobHelperResume()")), "resume instructions shown");
   // ---- no resume: stays paused ----
   const readyPages = logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length;
-  expect(readyPages === FAIL_PAGE - 1, "no pages advanced past the failing page while paused");
+  if (SCENARIO !== "warmup-verification") {
+    expect(readyPages === FAIL_PAGE - 1, "no pages advanced past the failing page while paused");
+  }
   await pump(); await pump();
-  expect(logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length ===
-    FAIL_PAGE - 1, "still paused without a resume");
+  if (SCENARIO !== "warmup-verification") {
+    expect(logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length ===
+      FAIL_PAGE - 1, "still paused without a resume");
+  }
 
-  if (SCENARIO === "resume-success") {
+  if (SCENARIO === "resume-success" || SCENARIO === "warmup-verification") {
+    // wait for the pagination pause (page 10 in resume-success; page 2
+    // during WARMUP in warmup-verification)
+    if (SCENARIO === "warmup-verification") {
+      // the FIRST pause must happen during warmup, before any "page N ready"
+      expect(logs.some((l) => l === "WARMUP_PAGE_UNSTABLE page 2"),
+        "warmup verification entered the human resume flow");
+      expect(logs.some((l) => l.includes("Automation is paused")), "warmup paused");
+      expect(logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length === 0,
+        "no formal pagination before warmup completes");
+    }
     // ---- user completes the site's verification, then explicitly resumes ----
     state.verified = true;
     expect(windowStub.jobHelperResume() === true, "jobHelperResume accepts the resume");
@@ -163,10 +196,29 @@ async function main() {
   expect(logs.some((l) => l.startsWith("stepping back to page ")), "previous→current retry step");
   expect(logs.some((l) => l === "verification/page recovered"), "page recovered after resume");
   expect(logs.some((l) => l === "resuming automation"), "automation resumed");
+  if (SCENARIO === "warmup-verification") {
+    expect(logs.some((l) => l === "verification/page recovered"),
+      "verification/page recovered logged for warmup resume");
+    expect(logs.some((l) => l === "resuming automation"),
+      "resuming automation logged for warmup resume");
+  }
   expect(logs.some((l) => l === "last page reached"), "pagination continued to the last page");
   expect(logs.some((l) => l === "total pages visited: 16"), "all 16 pages visited");
   expect(logs.some((l) => l === "done"), "helper completed");
   expect(state.list === 16, "final rendered page is the last page");
+  // warmup assertions (spec: 2->1 round-trip recreates the Page 1 request,
+  // pagesVisited untouched)
+  expect(logs.some((l) => l === "refreshing page 1 for HAR capture (page 1 -> 2 -> 1)"),
+    "warmup round-trip logged");
+  expect(logs.some((l) => l === "initial page refreshed for HAR capture"),
+    "initial page refreshed");
+  expect(logs.some((l) => l === "total pages visited: 16"), "pagesVisited not affected by warmup");
+  const firstPageReadyIndex = logs.findIndex((l) => l === "page 1 ready");
+  const warmupClicks = state.clicks.slice(0, firstPageReadyIndex < 0 ? 99 : 99);
+  expect(warmupClicks.includes(2) && warmupClicks.includes(1) &&
+    warmupClicks.indexOf(2) < warmupClicks.indexOf(1) &&
+    warmupClicks.indexOf(1) < firstPageReadyIndex,
+    "page 1 request recreated before formal pagination");
 
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);

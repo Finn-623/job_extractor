@@ -371,7 +371,7 @@ def _pick_har_path() -> str | None:
 _BROWSER_ASSIST_STEPS=(
     "1. 打开职位列表页面",
     "2. 打开浏览器 Network 并开始记录",
-    "3. 确保第一页请求已被记录",
+    "3. 助手会重新触发第一页请求（无需先刷新）",
     "4. 将每页数量调到最大",
     "5. 运行自动翻页助手",
     "6. 如出现网站验证，请手动完成",
@@ -426,13 +426,12 @@ def _browser_assist_menu(url: str, reporter: ProgressReporter, *,
     else:
         typer.echo("自动翻页助手不可用，请继续手动翻页。")
     typer.echo("请在浏览器中：")
-    for step in ("1. 打开开发者工具 → Network",
-                 "2. 开始录制并刷新第一页",
-                 "3. 打开 Console",
-                 "4. 粘贴刚刚复制的代码并执行",
-                 "5. 等待自动翻页完成",
-                 "6. 如出现验证，请手动完成",
-                 "7. 导出 HAR"):
+    for step in ("1. 打开开发者工具 → Network 并开始录制",
+                 "2. 打开 Console，粘贴刚刚复制的代码并执行",
+                 "（助手会重新触发第一页请求以确保 HAR 完整）",
+                 "3. 等待自动翻页完成",
+                 "4. 如出现验证，请手动完成",
+                 "5. 导出 HAR"):
         typer.echo(step)
     while True:
         answer=typer.prompt("[1] 选择 HAR 文件\n[2] 重新复制助手\n[3] 退出\n选择 [1]",
