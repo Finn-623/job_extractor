@@ -18,6 +18,10 @@ def _role_fields(keys:set[str])->tuple[set[str],set[str]]:
 
     Only explicit job-role suffixes qualify: arbitrary ``name``, ``id`` and
     ``code`` fields remain insufficient to promote config/material payloads.
+    A bare ``code`` is promoted to a job id only with explicit job-entity
+    evidence in the same record: a title role plus job metadata fields
+    (location/category/JD/link).  A ``code``+``name`` pair alone stays
+    unrecognized (reference/config-style payloads).
     """
     ids=keys & IDS
     titles=keys & TITLE
@@ -27,6 +31,8 @@ def _role_fields(keys:set[str])->tuple[set[str],set[str]]:
     # explicit job title role is also present.
     if titles:
         ids.update(key for key in keys if key.endswith("demandcode"))
+    if not ids and titles and keys & (LOCATION|CATEGORY|JD|LINK):
+        ids.update(key for key in keys if key=="code")
     return ids,titles
 
 def _fields(item:Any,depth:int=0)->set[str]:
@@ -86,13 +92,13 @@ def score_list(url:str,payload:Any)->tuple[int,list[str],dict[str,Any]]:
     homogeneity,density,fields=_array_metrics(items);shape=response_shape(payload)
     records=[x.get("node") if isinstance(x,dict) and isinstance(x.get("node"),dict) else x for x in items]
     shape.update({"candidate_list_path":path,"array_length":length,"sample_field_names":sorted({str(k) for x in records if isinstance(x,dict) for k in x})[:100],"sampled_items":len(items)})
-    shape["inferred_job_id_field"] = infer_field(shape["sample_field_names"],"id")
+    id_fields,title_fields=_role_fields(fields)
+    shape["inferred_job_id_field"] = infer_field(shape["sample_field_names"],"id") or next(iter(sorted(id_fields)),None)
     shape["inferred_job_title_field"] = infer_field(shape["sample_field_names"],"title")
     reasons=_negative_reasons(url,payload,homogeneity,density,fields)
     if "job" in low:score+=2;evidence.append("URL contains job/jobs")
     if "position" in low:score+=2;evidence.append("URL contains position")
     if "search" in low or "list" in low:score+=1;evidence.append("URL contains search/list")
-    id_fields,title_fields=_role_fields(fields)
     if title_fields:score+=3;evidence.append("records contain a title field")
     if id_fields:score+=3;evidence.append("records contain a stable id field")
     if fields&LOCATION:score+=2;evidence.append("records contain location/city")

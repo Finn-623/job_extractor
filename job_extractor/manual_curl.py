@@ -16,14 +16,28 @@ from job_extractor.models import CollectionMetrics, CollectionResult, Job
 from job_extractor.url_utils import normalize_url
 from job_extractor.step94h_debug import append as append_step94h_debug, enabled as step94h_debug_enabled
 
-_ID_NAMES={"id","jobid","job_id","positionid","position_id","postid","postingid","requisitionid"}
+_ID_NAMES={"id","jobid","job_id","positionid","position_id","postid","postingid","requisitionid","code"}
 _PAGE_NAMES={"page","pageindex","pageno","page_number","currentpage"}
 
 class ManualCurlResponseError(ValueError):
+    """cURL-driven request failed at the transport/response contract layer."""
     """Expected public-response failures, safe to present in the CLI."""
     def __init__(self, code:str, detail:str=""):
         super().__init__(code if not detail else f"{code} {detail}")
         self.code=code
+
+class PageReplayRejected(ManualCurlResponseError):
+    """N6.2: the pasted List cURL itself is valid (jobs already landed)
+    but automatic pagination via the same replayed request is rejected by
+    the site (risk control / dynamic verification). Distinct from an
+    invalid cURL: the caller should offer the browser-assisted HAR
+    fallback instead of treating the cURL as failed."""
+    def __init__(self, code: str = "CURL_PAGINATION_NOT_REPLAYABLE",
+                 detail: str = "", jobs_count: int = 0):
+        super().__init__(code, detail)
+        self.code = code
+        self.detail = detail
+        self.jobs_count = jobs_count
 
 class DetailCurlRequired(ValueError):
     """STEP94: raised when the hard priority chain exhausted its automatic
@@ -321,6 +335,7 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
         path=shape.get("candidate_list_path");records=get_path(payload,path)
         if not isinstance(records,list):raise ValueError("LIST_RECORDS_PATH_INVALID")
         fields=shape.get("sample_field_names",[]);id_field,title_field=infer_field(fields,"id"),infer_field(fields,"title")
+        if not id_field:id_field=shape.get("inferred_job_id_field")
         if not id_field or not title_field:raise ValueError("LIST_ID_OR_TITLE_FIELD_MISSING")
         total_path=shape.get("total_field");total=get_path(payload,total_path) if total_path else None
         total=total if isinstance(total,int) else None
@@ -357,7 +372,19 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
             if pages>=max_pages:
                 termination="MAX_PAGES";break
             page+=1
-            page_records=get_path(_request(client,list_spec.render_page(page)),path)
+            try:
+                page_payload=_request(client,list_spec.render_page(page))
+            except (httpx.HTTPError, ManualCurlResponseError) as exc:
+                if list_fetched>0:
+                    raise PageReplayRejected(
+                        jobs_count=len(all_records)) from exc
+                raise
+            page_records=get_path(page_payload,path)
+            if not isinstance(page_records,list) and list_fetched>0 and (
+                    isinstance(page_payload,dict) and page_payload.get("success") is False):
+                # HTTP 200 but business-level rejection on the replayed page:
+                # the cURL itself is valid; only deeper pagination is blocked.
+                raise PageReplayRejected(jobs_count=len(all_records))
             if not isinstance(page_records,list):raise ValueError("LIST_RECORDS_PATH_INVALID")
 
         if progress_callback:

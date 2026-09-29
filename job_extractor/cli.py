@@ -25,7 +25,8 @@ from job_extractor.progress import ProgressReporter, translate_reason  # STEP92:
 from job_extractor.discovery import load_reusable_discovery
 from job_extractor.discovery.runtime_data import resolve_encrypted_runtime_terminal
 from job_extractor.discovery.stability import stable_navigation
-from job_extractor.manual_curl import DetailCurlRequired, ManualCurlResponseError, manual_result_to_collection_result, parse_curl, run_manual_curl
+from job_extractor.manual_curl import DetailCurlRequired, ManualCurlResponseError, PageReplayRejected, manual_result_to_collection_result, parse_curl, run_manual_curl
+from job_extractor.har_importer import HarImportResult, import_har
 from job_extractor.step94h_debug import initialize as initialize_step94h_debug
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
@@ -246,6 +247,75 @@ def _write_fallback_failure(url: str, code: str, stage: str, **extra) -> None:
     failed=CollectionResult(source_url=url,status="FAILED",errors=[code],enrichment={"fallback":audit})
     generate_and_render_reports(failed,None,"GenericAdapter")
 
+def _run_har_fallback(url: str, reporter: ProgressReporter, har_path: str,
+                      auto_code: str, auto_stage: str) -> bool:
+    """N6.2: browser-assisted fallback — ingest a user-exported HAR through
+    the formal importer and push the resulting CollectionResult through the
+    standard stage pipeline. Pure offline parsing; the path may be shown,
+    HAR contents never dumped."""
+    path=Path(har_path).expanduser()
+    if not path.is_file():
+        typer.echo(f"HAR 文件不存在：{path.name}")
+        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                curl_failure_code="HAR_FILE_NOT_FOUND",
+                                curl_failure_reason="HAR_FILE_NOT_FOUND")
+        return False
+    try:
+        outcome=import_har(path)
+    except Exception:
+        typer.echo("HAR 导入失败：文件无法解析。")
+        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                curl_failure_code="HAR_IMPORT_FAILED",
+                                curl_failure_reason="HAR_IMPORT_FAILED")
+        return False
+    unified=outcome.result
+    if not unified.jobs:
+        typer.echo("HAR 中未找到可用的岗位数据。")
+        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                curl_failure_code="HAR_NO_JOBS",
+                                curl_failure_reason="HAR_NO_USABLE_JOB_RESPONSE")
+        return False
+    unified.enrichment["fallback"]=_fallback_audit(url,auto_code,auto_stage,
+        fallback_method="har_import",har_file=path.name)
+    reporter.use_curl_fallback(); reporter.stage(2)
+    metrics=outcome.metrics
+    typer.echo(f"HAR 导入成功\\n已恢复：{metrics['raw_rows']} raw / "
+               f"{metrics['unique_jobs']} unique")
+    reporter.note(2,f"{metrics['raw_rows']} 条原始记录")
+    reporter.stage(3)
+    reporter.note(3,f"唯一岗位 {metrics['unique_jobs']}")
+    reporter.close_current(); reporter.stage(4)
+    _finalize_stages(unified,"HarImportCollector",reporter)
+    return True
+
+def _har_fallback_menu(url: str, reporter: ProgressReporter, *,
+                       auto_code: str, auto_stage: str,
+                       jobs_count: int) -> bool:
+    """cURL read the current page but pagination cannot continue safely:
+    offer the browser-assisted HAR fallback (or a clean exit)."""
+    typer.echo("")
+    typer.echo(f"当前 cURL 可以读取岗位（{jobs_count} 条），但该站点的分页请求"
+               "使用动态验证信息，无法安全使用同一请求继续翻页。")
+    typer.echo("可切换到“浏览器辅助采集”。")
+    answer=typer.prompt("[1] 导入 HAR\n[2] 退出\n选择 [2]", default="2", show_default=False).strip().lower()
+    if answer=="2":
+        typer.echo("已结束。")
+        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                curl_failure_stage="LIST",
+                                curl_failure_code="CURL_PAGINATION_NOT_REPLAYABLE",
+                                curl_failure_reason="CURL_PAGINATION_NOT_REPLAYABLE")
+        return False
+    har_path=typer.prompt("请输入 HAR 文件路径", default="", show_default=False).strip()
+    if not har_path:
+        typer.echo("未提供 HAR 文件，已结束。")
+        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                curl_failure_stage="LIST",
+                                curl_failure_code="CANCEL",
+                                curl_failure_reason="CANCEL")
+        return False
+    reporter.use_curl_fallback()
+    return _run_har_fallback(url,reporter,har_path,auto_code,auto_stage)
+
 def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_code: str, auto_stage: str="DISCOVERY") -> bool:
     """Bridge an auto failure to the existing safe Manual cURL collector."""
     if not _stdin_is_interactive():
@@ -294,6 +364,14 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
         manual=run_manual_curl(list_curl,None,max_jobs=None,progress_callback=observe,
                                detail_browser_factory=_detail_page_factory(reporter),
                                detail_page_url=url,campaign_context=url)
+    except PageReplayRejected as exc:
+        stage=4 if detail_started else 2
+        reporter.stage_fail(stage,exc.code); reporter.failed_summary(stage,exc.code)
+        typer.echo("cURL 已读取当前页，但无法继续安全分页")
+        recovered=_har_fallback_menu(url,reporter,auto_code=auto_code,
+                                     auto_stage=auto_stage,
+                                     jobs_count=exc.jobs_count)
+        return recovered
     except ManualCurlResponseError as exc:
         stage=4 if detail_started else 2; reporter.stage_fail(stage,exc.code); reporter.failed_summary(stage,exc.code)
         _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage=stage,curl_failure_code=exc.code,curl_failure_reason=translate_reason(exc.code))

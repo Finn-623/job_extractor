@@ -45,7 +45,8 @@ def _locations(merged: dict) -> list[str]:
             if name and name not in out:
                 out.append(name)
     if not out:
-        for key in ("workPlaceStr", "workPlace", "workPlaceName", "locationStr", "location"):
+        for key in ("workPlaceStr", "workPlace", "workPlaceName", "workLocation",
+                    "locationStr", "location"):
             name = _nonempty_str(merged.get(key))
             if name:
                 out.append(name)
