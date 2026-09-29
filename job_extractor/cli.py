@@ -288,38 +288,161 @@ def _run_har_fallback(url: str, reporter: ProgressReporter, har_path: str,
     _finalize_stages(unified,"HarImportCollector",reporter)
     return True
 
-def _har_fallback_menu(url: str, reporter: ProgressReporter, *,
-                       auto_code: str, auto_stage: str,
-                       jobs_count: int | None = None,
-                       curl_failure_code: str = "CURL_PAGINATION_NOT_REPLAYABLE") -> bool:
-    """Browser-assisted HAR fallback (or a clean exit).
+def _pagination_helper_source() -> str | None:
+    """The formal pagination helper shipped with this repository."""
+    helper=Path(__file__).resolve().parents[1]/"scripts"/"pdd_browser_console_helper.js"
+    if not helper.is_file():return None
+    try:return helper.read_text(encoding="utf-8",errors="replace")
+    except OSError:return None
+
+def _copy_to_clipboard(text: str) -> bool:
+    import shutil as _shutil, subprocess as _subprocess
+    for command in (["pbcopy"],["clip"],["xsel","-b"],["xclip","-selection","clipboard"]):
+        if not _shutil.which(command[0]):continue
+        try:
+            _subprocess.run(command,input=text.encode("utf-8"),check=True,timeout=5)
+            return True
+        except Exception:continue
+    return False
+
+def _open_in_browser(url: str) -> bool:
+    import shutil as _shutil, subprocess as _subprocess
+    for command in (["open",url],["xdg-open",url]):
+        if not _shutil.which(command[0]):continue
+        try:
+            _subprocess.Popen(command,stdout=_subprocess.DEVNULL,stderr=_subprocess.DEVNULL)
+            return True
+        except Exception:continue
+    return False
+
+def _pick_har_path() -> str | None:
+    """Native file picker first (macOS); drag-into-terminal path fallback.
+
+    Returns a validated .har path, or None when the user cancels / the
+    selection is not usable (the caller returns to the assist menu)."""
+    import shutil as _shutil, subprocess as _subprocess
+    for _attempt in range(3):
+        picked=None
+        if sys.platform=="darwin" and _shutil.which("osascript"):
+            try:
+                proc=_subprocess.run(
+                    ["osascript","-e",
+                     'POSIX path of (choose file with prompt "选择浏览器导出的 HAR 文件")'],
+                    capture_output=True,text=True,timeout=180)
+                if proc.returncode==0 and proc.stdout.strip():
+                    picked=proc.stdout.strip()
+                else:
+                    return None  # user cancelled the native picker
+            except Exception:
+                picked=None
+        if picked is None:
+            typer.echo("请将 HAR 文件拖到此终端窗口，然后按回车")
+            raw=typer.get_text_stream("stdin").readline()
+            if raw=="":
+                return None
+            picked=raw.strip()
+            if not picked:
+                return None
+        candidate=picked.strip()
+        if (candidate.startswith("'") and candidate.endswith("'")) or (
+                candidate.startswith('"') and candidate.endswith('"')):
+            candidate=candidate[1:-1]
+        candidate=candidate.replace("\\ "," ").strip()
+        candidate=os.path.expanduser(candidate)
+        if not candidate.lower().endswith(".har"):
+            typer.echo("请选择 .har 浏览器采集文件。")
+            continue
+        return candidate
+    return None
+
+_BROWSER_ASSIST_STEPS=(
+    "1. 打开职位列表页面",
+    "2. 打开浏览器 Network 并开始记录",
+    "3. 确保第一页请求已被记录",
+    "4. 将每页数量调到最大",
+    "5. 运行自动翻页助手",
+    "6. 如出现网站验证，请手动完成",
+    "7. 翻页完成后导出 HAR",
+)
+
+def _browser_assist_menu(url: str, reporter: ProgressReporter, *,
+                         auto_code: str, auto_stage: str,
+                         jobs_count: int | None = None,
+                         curl_failure_code: str = "CURL_PAGINATION_NOT_REPLAYABLE") -> bool:
+    """Browser-assisted collection UX (or a clean exit).
 
     jobs_count set = proven "current page valid, pagination rejected"
     (recommended path). jobs_count None = user-initiated upgrade from a
     MANUAL_CURL_INVALID outcome (user choice, not a system reclassification)."""
     typer.echo("")
+    typer.echo("浏览器辅助采集")
     if jobs_count is not None:
         typer.echo(f"当前 cURL 可以读取岗位（{jobs_count} 条），但该站点的分页请求"
                    "使用动态验证信息，无法安全使用同一请求继续翻页。")
-        typer.echo("可切换到“浏览器辅助采集”。")
-    answer=typer.prompt("[1] 导入 HAR\n[2] 退出\n选择 [2]", default="2", show_default=False).strip().lower()
-    if answer=="2":
+    typer.echo("该网站需要在正常浏览器中完成分页请求。接下来：")
+    for step in _BROWSER_ASSIST_STEPS:
+        typer.echo(step)
+    answer=typer.prompt("[1] 开始浏览器辅助\n[2] 我已经有 HAR\n[3] 退出\n选择 [1]",
+                        default="1", show_default=False).strip().lower()
+    if answer=="3":
         typer.echo("已结束。")
         _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
                                 curl_failure_stage="LIST",
                                 curl_failure_code=curl_failure_code,
                                 curl_failure_reason=curl_failure_code)
         return False
-    har_path=typer.prompt("请输入 HAR 文件路径", default="", show_default=False).strip()
-    if not har_path:
-        typer.echo("未提供 HAR 文件，已结束。")
-        _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
-                                curl_failure_stage="LIST",
-                                curl_failure_code="CANCEL",
-                                curl_failure_reason="CANCEL")
-        return False
-    reporter.use_curl_fallback()
-    return _run_har_fallback(url,reporter,har_path,auto_code,auto_stage)
+    if answer=="2":
+        har_path=_pick_har_path()
+        if har_path is None:
+            return _browser_assist_menu(url,reporter,auto_code=auto_code,
+                                        auto_stage=auto_stage,jobs_count=jobs_count,
+                                        curl_failure_code=curl_failure_code)
+        reporter.use_curl_fallback()
+        return _run_har_fallback(url,reporter,har_path,auto_code,auto_stage)
+    # [1] 开始浏览器辅助：最小自动化 = 打开正常招聘页 + 复制助手到剪贴板。
+    # 不注入 Console JS、不碰验证弹窗、不读 Cookie —— 粘贴与验证由用户完成。
+    helper=_pagination_helper_source()
+    copied=bool(helper and _copy_to_clipboard(helper))
+    if url and _open_in_browser(url):
+        typer.echo("✓ 已打开职位列表页面")
+    if copied:
+        typer.echo("✓ 自动翻页助手已复制到剪贴板")
+    elif helper is not None:
+        typer.echo("自动翻页助手复制失败。助手文件位于仓库 scripts/pdd_browser_console_helper.js，"
+                   "可手动打开复制。")
+    else:
+        typer.echo("自动翻页助手不可用，请继续手动翻页。")
+    typer.echo("请在浏览器中：")
+    for step in ("1. 打开开发者工具 → Network",
+                 "2. 开始录制并刷新第一页",
+                 "3. 打开 Console",
+                 "4. 粘贴刚刚复制的代码并执行",
+                 "5. 等待自动翻页完成",
+                 "6. 如出现验证，请手动完成",
+                 "7. 导出 HAR"):
+        typer.echo(step)
+    while True:
+        answer=typer.prompt("[1] 选择 HAR 文件\n[2] 重新复制助手\n[3] 退出\n选择 [1]",
+                            default="1", show_default=False).strip().lower()
+        if answer=="3":
+            typer.echo("已结束。")
+            _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,
+                                    curl_failure_stage="LIST",
+                                    curl_failure_code=curl_failure_code,
+                                    curl_failure_reason=curl_failure_code)
+            return False
+        if answer=="2":
+            helper=_pagination_helper_source()
+            if helper and _copy_to_clipboard(helper):
+                typer.echo("✓ 自动翻页助手已复制到剪贴板")
+            else:
+                typer.echo("自动翻页助手复制失败，请手动打开 scripts/pdd_browser_console_helper.js 复制。")
+            continue
+        har_path=_pick_har_path()
+        if har_path is None:
+            continue
+        reporter.use_curl_fallback()
+        return _run_har_fallback(url,reporter,har_path,auto_code,auto_stage)
 
 def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_code: str, auto_stage: str="DISCOVERY") -> bool:
     """Bridge an auto failure to the existing safe Manual cURL collector."""
@@ -376,7 +499,7 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
             stage=4 if detail_started else 2
             reporter.stage_fail(stage,exc.code); reporter.failed_summary(stage,exc.code)
             typer.echo("cURL 已读取当前页，但无法继续安全分页")
-            recovered=_har_fallback_menu(url,reporter,auto_code=auto_code,
+            recovered=_browser_assist_menu(url,reporter,auto_code=auto_code,
                                          auto_stage=auto_stage,
                                          jobs_count=exc.jobs_count)
             return recovered
@@ -408,7 +531,7 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
             answer=typer.prompt("[1] 重新粘贴 cURL\n[2] 使用浏览器辅助采集\n[3] 退出\n选择 [1]",
                                 default="1", show_default=False).strip().lower()
             if answer=="2":
-                return _har_fallback_menu(url,reporter,auto_code=auto_code,
+                return _browser_assist_menu(url,reporter,auto_code=auto_code,
                                           auto_stage=auto_stage, jobs_count=None,
                                           curl_failure_code="MANUAL_CURL_INVALID")
             if answer=="3":

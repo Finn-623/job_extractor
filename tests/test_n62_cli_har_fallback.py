@@ -117,8 +117,9 @@ def test_page_replay_rejected_offers_har_and_succeeds(monkeypatch, tmp_path):
         return _stub_har_outcome()
     monkeypatch.setattr(cli, "import_har", record_path)
     har = _write_har(tmp_path)
+    monkeypatch.setattr(cli, "_pick_har_path", lambda: har)
     result = runner.invoke(app, ["https://example.com/jobs"],
-                           input=_CURL_INPUT + "1\n" + har + "\n")
+                           input=_CURL_INPUT + "2\n")
     assert result.exit_code == 0
     assert "无法安全使用同一请求继续翻页" in result.output
     assert "HAR 导入成功" in result.output
@@ -134,7 +135,7 @@ def test_page_replay_rejected_user_exits_cleanly(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_write_fallback_failure",
                         lambda *_a, **_k: None)
     result = runner.invoke(app, ["https://example.com/jobs"],
-                           input=_CURL_INPUT + "2\n")
+                           input=_CURL_INPUT + "3\n")
     assert result.exit_code == 0 and "Traceback" not in result.output
     assert "已结束。" in result.output
     assert "请输入 HAR 文件路径" not in result.output
@@ -148,8 +149,9 @@ def test_har_invalid_file_friendly_error(monkeypatch, tmp_path):
                         lambda *_a, **_k: None)
     bad = tmp_path / "bad.har"
     bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(cli, "_pick_har_path", lambda: str(bad))
     result = runner.invoke(app, ["https://example.com/jobs"],
-                           input=_CURL_INPUT + "1\n" + str(bad) + "\n")
+                           input=_CURL_INPUT + "2\n")
     assert result.exit_code == 0 and "Traceback" not in result.output
     assert "HAR 导入失败：文件无法解析。" in result.output
 
@@ -161,8 +163,9 @@ def test_har_missing_path_friendly_error(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_write_fallback_failure",
                         lambda *_a, **_k: None)
     missing = tmp_path / "missing.har"
+    monkeypatch.setattr(cli, "_pick_har_path", lambda: str(missing))
     result = runner.invoke(app, ["https://example.com/jobs"],
-                           input=_CURL_INPUT + "1\n" + str(missing) + "\n")
+                           input=_CURL_INPUT + "2\n")
     assert result.exit_code == 0 and "Traceback" not in result.output
     assert "HAR 文件不存在" in result.output
 
@@ -177,8 +180,9 @@ def test_har_no_jobs_friendly_error(monkeypatch, tmp_path):
     outcome.result.jobs = []
     monkeypatch.setattr(cli, "import_har", lambda path: outcome)
     har = _write_har(tmp_path)
+    monkeypatch.setattr(cli, "_pick_har_path", lambda: har)
     result = runner.invoke(app, ["https://example.com/jobs"],
-                           input=_CURL_INPUT + "1\n" + har + "\n")
+                           input=_CURL_INPUT + "2\n")
     assert result.exit_code == 0 and "Traceback" not in result.output
     assert "HAR 中未找到可用的岗位数据。" in result.output
 
@@ -190,8 +194,9 @@ def test_no_sensitive_material_in_fallback_output(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "generate_and_render_reports",
                         lambda *_a, **_k: "ok")
     har = _write_har(tmp_path)
+    monkeypatch.setattr(cli, "_pick_har_path", lambda: har)
     result = runner.invoke(app, ["https://example.com/jobs"],
-                           input=_CURL_INPUT + "1\n" + har + "\n")
+                           input=_CURL_INPUT + "2\n")
     assert result.exit_code == 0
     for token in ("anti_content", "verifyAuthToken", "Authorization",
                   "Cookie", "postData"):

@@ -181,10 +181,10 @@ def test_cli_initial_http_400_browser_assist_enters_har(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "import_har", lambda path: outcome)
     har = tmp_path / "fresh.har"
     har.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli, "_pick_har_path", lambda: str(har))
 
     result = CliRunner().invoke(app, ["https://example.com/jobs"], input=(
-        "\ncurl 'https://careers.example.com/api/recruit/position/list'\nEND\n2\n1\n"
-        + str(har) + "\n"))
+        "\ncurl 'https://careers.example.com/api/recruit/position/list'\nEND\n2\n2\n"))
     assert result.exit_code == 0 and "Traceback" not in result.output
     assert "HAR 导入成功" in result.output
     assert "已恢复：2 raw / 2 unique" in result.output
@@ -203,7 +203,8 @@ def test_pagination_replay_rejected_cli_still_offers_har(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_write_fallback_failure", lambda *a, **k: None)
     har = tmp_path / "x.har"
     har.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli, "_pick_har_path", lambda: str(har))
     result = CliRunner().invoke(app, ["https://example.com/jobs"], input=(
-        "\ncurl 'https://x.test'\nEND\n1\n" + str(har) + "\n"))
-    assert "请输入 HAR 文件路径" in result.output
+        "\ncurl 'https://x.test'\nEND\n1\n1\n"))
+    assert "已打开职位列表页面" in result.output  # assist launch ran
     assert "HAR 中未找到可用的岗位数据。" in result.output  # {} HAR: no usable response
