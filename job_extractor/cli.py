@@ -306,14 +306,27 @@ def _copy_to_clipboard(text: str) -> bool:
     return False
 
 def _open_in_browser(url: str) -> bool:
+    """Open the normal recruitment page; prefer Chrome on macOS for its
+    developer tools workflow, falling back to the system default browser,
+    then xdg-open elsewhere. Failure never blocks the flow."""
     import shutil as _shutil, subprocess as _subprocess
-    for command in (["open",url],["xdg-open",url]):
-        if not _shutil.which(command[0]):continue
+    commands: list[list[str]] = []
+    if sys.platform == "darwin" and _shutil.which("open"):
+        if _shutil.which("chrome") or _app_exists("Google Chrome"):
+            commands.append(["open", "-a", "Google Chrome", url])
+        commands.append(["open", url])
+    else:
+        commands.append(["xdg-open", url])
+    for command in commands:
         try:
             _subprocess.Popen(command,stdout=_subprocess.DEVNULL,stderr=_subprocess.DEVNULL)
             return True
         except Exception:continue
     return False
+
+def _app_exists(app_name: str) -> bool:
+    return os.path.isdir(os.path.join("/Applications", f"{app_name}.app")) or \
+        os.path.isdir(os.path.expanduser(f"~/Applications/{app_name}.app"))
 
 def _pick_har_path() -> str | None:
     """Native file picker first (macOS); drag-into-terminal path fallback.

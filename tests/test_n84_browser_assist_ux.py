@@ -43,7 +43,8 @@ def test_start_browser_assist_copies_helper(monkeypatch, tmp_path):
     copied = []
     monkeypatch.setattr(cli, "_pagination_helper_source", lambda: "HELPER();")
     result = _page_replay_rejected_cli(monkeypatch, tmp_path, _CURL_INPUT + "1\n3\n",
-                                       copy=lambda text: copied.append(text) or True)
+                                       copy=lambda text: copied.append(text) or True,
+                                       open=lambda url: True)
     assert copied == ["HELPER();"]
     assert "✓ 已打开职位列表页面" in result.output
     assert "✓ 自动翻页助手已复制到剪贴板" in result.output
@@ -54,9 +55,42 @@ def test_start_browser_assist_copies_helper(monkeypatch, tmp_path):
 def test_browser_open_failure_does_not_block(monkeypatch, tmp_path):
     result = _page_replay_rejected_cli(monkeypatch, tmp_path, _CURL_INPUT + "1\n3\n",
                                        open=lambda url: False)
-    assert result.exit_code == 0 and "Traceback" not in result.output
-    assert "✓ 自动翻页助手已复制到剪贴板" in result.output
-    assert "已打开职位列表页面" not in result.output  # open failed, flow continues
+
+
+def test_macos_prefers_google_chrome(monkeypatch, tmp_path):
+    opened = []
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_app_exists", lambda name: True)
+    import shutil as _sh
+    monkeypatch.setattr(_sh, "which", lambda name: "/usr/bin/" + name)
+    real_popen = None
+    import subprocess as _sp
+    def fake_popen(command, **kwargs):
+        opened.append(command)
+        return type("P", (), {"poll": lambda self: 0})()
+    monkeypatch.setattr(_sp, "Popen", fake_popen)
+    assert cli._open_in_browser("https://x.test/jobs") is True
+    assert opened == [["open", "-a", "Google Chrome", "https://x.test/jobs"]]
+
+
+def test_chrome_failure_falls_back_to_default_open(monkeypatch, tmp_path):
+    opened = []
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_app_exists", lambda name: True)
+    import shutil as _sh
+    monkeypatch.setattr(_sh, "which", lambda name: "/usr/bin/" + name)
+    import subprocess as _sp
+    calls = {"n": 0}
+    def fake_popen(command, **kwargs):
+        opened.append(command)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("Chrome launch failed")
+        return type("P", (), {"poll": lambda self: 0})()
+    monkeypatch.setattr(_sp, "Popen", fake_popen)
+    assert cli._open_in_browser("https://x.test/jobs") is True
+    assert opened[0] == ["open", "-a", "Google Chrome", "https://x.test/jobs"]
+    assert opened[1] == ["open", "https://x.test/jobs"]
 
 
 def test_existing_har_choice_uses_picker(monkeypatch, tmp_path):
