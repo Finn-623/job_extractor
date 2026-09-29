@@ -1,4 +1,5 @@
 from typer.testing import CliRunner
+from job_extractor import __version__
 from job_extractor.cli import app
 from job_extractor.models import CollectionResult, CollectionMetrics, Job
 from job_extractor.discovery.models import DiscoveryResult,NavigationGraph,ApiCandidate
@@ -10,7 +11,7 @@ runner = CliRunner()
 def test_version_returns_zero():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "2.0.0" in result.output
+    assert __version__ in result.output
 
 def test_zhiye_detection(monkeypatch, tmp_path):
     monkeypatch.setattr("job_extractor.adapters.beisen_cms.BeisenCMSCollector.probe", classmethod(lambda cls, url: False))

@@ -102,7 +102,7 @@ python main.py "https://example.com/jobs"
 
 运行时间取决于岗位数量，通常几十秒到几分钟。完成后终端会显示输出文件位置。
 
-> 这 5 个阶段属于第一层「自动模式」。如果自动处理失败，程序还会依次尝试 Browser fallback（浏览器兜底）和 Manual cURL fallback（手动 cURL 兜底），三层机制见第 12 节。
+> 这 5 个阶段属于第一层「自动模式」。如果自动处理失败，程序还会依次尝试 Manual cURL fallback（手动 cURL 兜底）和 Browser-assisted collection（浏览器辅助采集），三层机制见第 12 节。
 
 ## 8. 去哪里看结果
 
