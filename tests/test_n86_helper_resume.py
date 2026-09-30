@@ -87,7 +87,7 @@ def test_late_arriving_jd_is_waited_for_and_captured():
 def test_per_page_accumulation_log_reconciles_total():
     proc = _run_scenario("resume-success")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "PASS page 1 visible count" in proc.stdout
+    assert "PASS page 1 unique jobs count" in proc.stdout
     assert "PASS last page accumulated the tail" in proc.stdout
 
 
@@ -123,6 +123,24 @@ def test_hidden_stale_anchors_never_accumulated():
 
 
 def test_page_target_count_invalid_never_accumulates():
+    proc = _run_scenario("count-invalid")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_duplicate_visible_anchors_dedupe_to_unique_jobs():
+    proc = _run_scenario("dup-anchors")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_fifty_unique_jobs_pass_count_check():
+    proc = _run_scenario("unique-51")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_fifty_one_unique_jobs_reported_invalid():
     proc = _run_scenario("count-invalid")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "SCENARIO_ALL_PASS" in proc.stdout

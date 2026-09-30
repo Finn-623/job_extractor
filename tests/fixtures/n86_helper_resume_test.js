@@ -24,6 +24,11 @@ if (process.env.HELPER_DEBUG || SCENARIO === "worker-closed") {
 let FAIL_PAGE = 10, TOTAL_PAGES = 16, PAGE_SIZE = 50;
 if (SCENARIO === "single-page") { TOTAL_PAGES = 1; }
 if (SCENARIO === "detail-worker") { TOTAL_PAGES = 3; PAGE_SIZE = 3; FAIL_PAGE = 2; }
+if (SCENARIO === "dup-anchors" || SCENARIO === "unique-51") {
+  TOTAL_PAGES = 1; FAIL_PAGE = 99;
+}
+if (SCENARIO === "unique-51") { PAGE_SIZE = 50; }
+if (SCENARIO === "dup-anchors") { PAGE_SIZE = 48; }
 const LAST_PAGE = TOTAL_PAGES;
 // which pages fail their list request until the user completes verification
 const VERIFIED_PAGES = SCENARIO === "warmup-verification"
@@ -64,13 +69,24 @@ function jobsFor(page) {
                  page === LAST_PAGE) ? 42 : PAGE_SIZE;
   for (let i = 0; i < count; i++) {
     out.push(jobLink(page, i));
+    // duplicate visible anchors per job (real list DOM behaviour): 2-3
+    // anchors carry the same detail code
+    if (SCENARIO === "dup-anchors") {
+      out.push(jobLink(page, i));
+      if (i % 2 === 0) out.push(jobLink(page, i));
+    }
   }
   // stale/hidden pollution: previous-page anchors retained in the DOM but
   // hidden, plus hidden same-page duplicates — must never be accumulated
-  if (SCENARIO === "hidden-stale" || SCENARIO === "count-invalid") {
-    const extra = SCENARIO === "count-invalid" ? count : 7;
-    for (let i = 0; i < extra; i++) out.push(jobLink(page, count + i, true));
+  if (SCENARIO === "count-invalid") {
+    for (let i = 0; i < count; i++) out.push(jobLink(page, count + i));  // visible extras
+  }
+  if (SCENARIO === "hidden-stale") {
+    for (let i = 0; i < 7; i++) out.push(jobLink(page, count + i, true));
     for (let i = 0; i < count; i++) out.push(jobLink(Math.max(1, page - 1), i, true));
+  }
+  if (SCENARIO === "unique-51") {
+    out.push(jobLink(page, count));       // 51st unique job
   }
   return out;
 }
@@ -232,6 +248,27 @@ async function main() {
     process.exit(failures === 0 ? 0 : 1);
   }
 
+  if (SCENARIO === "dup-anchors" || SCENARIO === "unique-51" ||
+      SCENARIO === "count-invalid") {
+    let guard = 0;
+    while (!logs.some((l) => l === "done") && guard++ < 4000) await pump();
+    if (SCENARIO === "count-invalid") {
+      expect(logs.some((l) => l.startsWith("PAGE_TARGET_COUNT_INVALID page 1")),
+        "count invalid reported");
+      expect(!logs.some((l) => l.startsWith("page 1 new_unique:")), "no polluted accumulation");
+    } else {
+      expect(!logs.some((l) => l.startsWith("PAGE_TARGET_COUNT_INVALID")), "no invalid count");
+      const r2 = results();
+      if (SCENARIO === "dup-anchors") {
+        expect(r2.every((x) => x.status === "SUCCESS"), "all unique jobs captured");
+        expect(new Set(r2.map((x) => x.code)).size === r2.length,
+          "accumulator adds each code exactly once");
+      }
+    }
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
   // ---- scenario 1: stability timeout pauses automation (no next click) ----
   let guard = 0;
   let readyPagesAtPause = null;
@@ -296,7 +333,7 @@ async function main() {
   expect(accumLines.length === TOTAL_PAGES, "every page logs its accumulation");
   if (SCENARIO === "resume-success") {
     // fixture: 50 links/page + 42 on the last page, dedupe by code
-    expect(logs.some((l) => l === "page 1 visible: 50"), "page 1 visible count");
+    expect(logs.some((l) => l === "page 1 unique_jobs: 50"), "page 1 unique jobs count");
     expect(logs.some((l) => l === "page 1 new_unique: +50"), "page 1 accumulated +50");
     expect(logs.some((l) => l === "page " + TOTAL_PAGES + " new_unique: +42"),
       "last page accumulated the tail");
@@ -320,7 +357,9 @@ async function main() {
     SCENARIO === "worker-closed" || SCENARIO === "identity-mismatch" ||
     SCENARIO === "ids-filter" || SCENARIO === "ids-unknown" ||
     SCENARIO === "bonus" || SCENARIO === "bonus-none" ||
-    SCENARIO === "shell-only" || SCENARIO === "late-jd";
+    SCENARIO === "shell-only" || SCENARIO === "late-jd" ||
+    SCENARIO === "dup-anchors" || SCENARIO === "unique-51" ||
+    SCENARIO === "hidden-stale" || SCENARIO === "count-invalid";
   if (hasVerificationPause && !detailScenario) {
     expect(logs.some((l) => l === "resume requested"), "explicit resume logged");
     if (SCENARIO !== "warmup-verification") {
@@ -402,11 +441,36 @@ async function main() {
   }
 
   if (SCENARIO === "hidden-stale") {
-    // page 1 renders 50 visible anchors + 7 hidden same-page + hidden
-    // previous-page ones: only the visible 50 may accumulate
-    expect(logs.some((l) => l === "page 1 visible: 50"), "visible count is 50");
+    expect(logs.some((l) => l === "page 1 unique_jobs: 50"), "unique jobs is 50");
     expect(logs.some((l) => l === "page 1 new_unique: +50"), "+50 not +57");
     expect(logs.some((l) => l === "page 1 accumulated: 50"), "accumulated 50");
+    // page 1 renders 50 visible anchors + 7 hidden same-page + hidden
+    // previous-page ones: only the visible 50 may accumulate
+    expect(logs.some((l) => l === "page 1 unique_jobs: 50"), "unique jobs is 50");
+    expect(logs.some((l) => l === "page 1 new_unique: +50"), "+50 not +57");
+    expect(logs.some((l) => l === "page 1 accumulated: 50"), "accumulated 50");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  if (SCENARIO === "dup-anchors") {
+    // 48 unique jobs, each with 2-3 visible duplicate anchors (128 raw):
+    // raw anchor count may exceed the page size — never an error; the
+    // accumulator must add exactly one target per unique code
+    expect(logs.some((l) => l.startsWith("PAGE_TARGET_COUNT_INVALID")), "no invalid count");
+    const r2 = results();
+    expect(r2.every((x) => x.status === "SUCCESS"), "all unique jobs captured");
+    const codes = new Set(r2.map((x) => x.code));
+    expect(codes.size === r2.length, "accumulator adds each code exactly once");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  if (SCENARIO === "unique-51") {
+    // 51 unique jobs on one page: real page-size violation
+    expect(logs.some((l) => l.startsWith("PAGE_TARGET_COUNT_INVALID page 1")),
+      "51 unique jobs reported invalid");
+    expect(!logs.some((l) => l.startsWith("page 1 new_unique:")), "no polluted accumulation");
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }

@@ -78,16 +78,32 @@
   // the page-settle signal and the accumulation collector must never query
   // the DOM with different filters — stale/hidden previous-page nodes must
   // not pollute either one.
+  // Returns the current page's UNIQUE job targets (one canonical target per
+  // stable code). Real list DOMs render multiple visible anchors per job
+  // (raw anchor count can far exceed the page size — that is normal);
+  // officialPageSize counts unique jobs, so this getter must dedupe by the
+  // parsed stable identity.
   const currentVisibleDetailTargets = () => {
-    const out = [];
+    const raw = [];
     document.querySelectorAll(DETAIL_LINK_SELECTOR).forEach((a) => {
       if (a.offsetParent === null && a.getClientRects().length === 0) return;
-      out.push(a);
+      let code = null, url = a.href;
+      try { code = new URL(url, location.href).searchParams.get("code"); } catch {}
+      if (!code) return;
+      raw.push({ code, url, anchor: a,
+                 title: (a.textContent || "").trim() });
     });
-    return out;
+    // canonical target per code: prefer a valid href with a title
+    const byCode = new Map();
+    for (const item of raw) {
+      const existing = byCode.get(item.code);
+      if (!existing) { byCode.set(item.code, item); continue; }
+      if (!existing.title && item.title) byCode.set(item.code, item);
+    }
+    return [...byCode.values()];
   };
   const visibleIds = () =>
-    new Set(currentVisibleDetailTargets().map((a) => a.href));
+    new Set(currentVisibleDetailTargets().map((t) => t.url));
   const sameSet = (a, b) =>
     a.size === b.size && [...a].every((v) => b.has(v));
 
@@ -380,22 +396,21 @@
   const accumulatedDetailTargets = [];
   const seenDetailCodes = new Set();
   const collectDetailTargets = (pageNo) => {
-    // only the current page's actually-visible anchors — never the whole
-    // document (stale/hidden previous-page nodes must not be accumulated)
-    const visible = currentVisibleDetailTargets();
-    const v = visible.length;
-    console.log("page " + pageNo + " visible: " + v);
-    if (officialPageSize && v > officialPageSize) {
-      console.log("PAGE_TARGET_COUNT_INVALID page " + pageNo + " visible " + v +
-        " > page size " + officialPageSize);
+    // only the current page's unique job targets — never stale/hidden nodes
+    const targets = currentVisibleDetailTargets();
+    console.log("page " + pageNo + " raw_anchors: " +
+      document.querySelectorAll(DETAIL_LINK_SELECTOR).length);
+    console.log("page " + pageNo + " unique_jobs: " + targets.length);
+    if (officialPageSize && targets.length > officialPageSize) {
+      console.log("PAGE_TARGET_COUNT_INVALID page " + pageNo + " unique_jobs " +
+        targets.length + " > page size " + officialPageSize);
       return accumulatedDetailTargets.length;  // never accumulate polluted data
     }
     let newUnique = 0;
-    for (const anchor of visible) {
-      let url = anchor.href;
-      let code = null;
-      try { code = new URL(url, location.href).searchParams.get("code"); } catch {}
-      if (!code || seenDetailCodes.has(code)) continue;
+    for (const target of targets) {
+      const url = target.url;
+      const code = target.code;
+      if (seenDetailCodes.has(code)) continue;
       seenDetailCodes.add(code);
       let idParam = "code";
       try {
@@ -404,7 +419,7 @@
         }
       } catch {}
       newUnique += 1;
-      accumulatedDetailTargets.push({ code, title: (anchor.textContent || "").trim(),
+      accumulatedDetailTargets.push({ code, title: target.title,
                                       url, idParam });
     }
     console.log("page " + pageNo + " new_unique: +" + newUnique);
