@@ -9,16 +9,18 @@ const path = require("path");
 let helperSource = fs.readFileSync(
   path.join(__dirname, "..", "..", "scripts", "pdd_browser_console_helper.js"),
   "utf8");
-if (process.env.HELPER_DEBUG) {
+const SCENARIO = process.argv[2] || "resume-success";
+if (process.env.HELPER_DEBUG || SCENARIO === "worker-closed") {
   helperSource = helperSource
     .replace('return "DETAIL_DOM_NOT_CREDIBLE";', 'console.log("[DBG DOM_NOT_CREDIBLE]"); return "DETAIL_DOM_NOT_CREDIBLE";')
     .replace('if (Date.now() >= deadline) return "DETAIL_NAV_TIMEOUT";', 'if (Date.now() >= deadline) { console.log("[DBG NAV_TIMEOUT]"); return "DETAIL_NAV_TIMEOUT"; }')
     .replace('if (workerLandedOk(target)) break;', 'console.log("[DBG landed=" + workerLandedOk(target) + " workerHref=" + (detailWorker.location && detailWorker.location.href) + "]"); if (workerLandedOk(target)) break;')
     .replace('console.log("DETAIL_WORKER_CLOSED");', 'console.log("DETAIL_WORKER_CLOSED"); console.log("[DBG WORKER_CLOSED]");')
-    .replace('      const credible = text.length >= DETAIL_MIN_TEXT &&', 'console.log("[DBG poll len=" + text.length + "]");\n      const credible = text.length >= DETAIL_MIN_TEXT &&');
+    .replace('      const credible = text.length >= DETAIL_MIN_TEXT &&', 'console.log("[DBG poll len=" + text.length + "]");\n      const credible = text.length >= DETAIL_MIN_TEXT &&')
+    .replace('console.log("JD 详情：" + batchIndex + " / " + batchSize +',
+      'console.log("[CLOSE_INJECT] batchIndex=" + batchIndex); if (batchIndex === 3 && detailWorker) { detailWorker.closed = true; } console.log("JD 详情：" + batchIndex + " / " + batchSize +');
 }
 
-const SCENARIO = process.argv[2] || "resume-success";
 let FAIL_PAGE = 10, TOTAL_PAGES = 16, PAGE_SIZE = 50;
 if (SCENARIO === "single-page") { TOTAL_PAGES = 1; }
 if (SCENARIO === "detail-worker") { TOTAL_PAGES = 3; PAGE_SIZE = 3; FAIL_PAGE = 2; }
@@ -277,6 +279,16 @@ async function main() {
     "warmup round-trip logged");
   expect(logs.some((l) => l === "initial page refreshed for HAR capture"),
     "initial page refreshed");
+  // per-page accumulation audit: each page logs its unique-code delta and
+  // the running total (evidence for total reconciliation)
+  const accumLines = logs.filter((l) => l.startsWith("page ") && l.includes("accumulated: +"));
+  expect(accumLines.length === TOTAL_PAGES, "every page logs its accumulation");
+  if (SCENARIO === "resume-success") {
+    // fixture: 50 links/page + 42 on the last page, dedupe by code
+    expect(accumLines[0].includes("+50 -> 50"), "page 1 accumulated +50");
+    expect(accumLines[accumLines.length - 1].includes("+42 -> " + (15 * 50 + 42)),
+      "last page accumulated the tail and the grand total");
+  }
 
   if (SCENARIO === "detail-worker" || SCENARIO === "warmup-verification") {
     expect(logs.some((l) => l === "WARMUP_PAGE_UNSTABLE page 2"),
@@ -290,15 +302,22 @@ async function main() {
     state.clicks.indexOf(1) < firstPageReadyIndex,
     "page 1 request recreated before formal pagination");
 
-  if (hasVerificationPause) {
-    if (SCENARIO !== "detail-worker") {
-      expect(logs.some((l) => l === "resume requested"), "explicit resume logged");
-      if (SCENARIO !== "warmup-verification") {
-        expect(logs.some((l) => l.startsWith("stepping back to page ")), "previous→current retry step");
-      }
-      expect(logs.some((l) => l === "verification/page recovered"), "page recovered after resume");
-      expect(logs.some((l) => l === "resuming automation"), "automation resumed");
+  const detailScenario = SCENARIO === "detail-worker" || SCENARIO === "worker-blocked" ||
+    SCENARIO === "worker-closed" || SCENARIO === "identity-mismatch" ||
+    SCENARIO === "ids-filter" || SCENARIO === "ids-unknown" ||
+    SCENARIO === "bonus" || SCENARIO === "bonus-none" ||
+    SCENARIO === "shell-only" || SCENARIO === "late-jd";
+  if (hasVerificationPause && !detailScenario) {
+    expect(logs.some((l) => l === "resume requested"), "explicit resume logged");
+    if (SCENARIO !== "warmup-verification") {
+      expect(logs.some((l) => l.startsWith("stepping back to page ")), "previous→current retry step");
     }
+    expect(logs.some((l) => l === "verification/page recovered"), "page recovered after resume");
+    expect(logs.some((l) => l === "resuming automation"), "automation resumed");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+  if (!detailScenario) {
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }
@@ -306,11 +325,18 @@ async function main() {
   // ================= detail worker scenarios =================
   // ---- detail queue built from real list anchors ----
   guard = 0;
+  if (SCENARIO === "worker-blocked") state.popupBlocked = true;
   let startDetailsPromise = null;
+  let idsFilterPage1Code = null;
   if (SCENARIO === "identity-mismatch") {
     const firstCode = (jobsFor(LAST_PAGE)[0].href.match(/code=([^&]+)/) || [])[1];
     state.workerRedirect = { forCode: firstCode, landingCode: "T099999" };
     startDetailsPromise = windowStub.jobHelperStartDetails();
+  } else if (SCENARIO === "ids-filter") {
+    idsFilterPage1Code = (jobsFor(1)[0].href.match(/code=([^&]+)/) || [])[1];
+    startDetailsPromise = windowStub.jobHelperStartDetails([idsFilterPage1Code]);
+  } else if (SCENARIO === "ids-unknown") {
+    startDetailsPromise = windowStub.jobHelperStartDetails(["NOPE"]);
   } else {
     startDetailsPromise = windowStub.jobHelperStartDetails();
   }
@@ -337,7 +363,7 @@ async function main() {
     const page1Code = (jobsFor(1)[0].href.match(/code=([^&]+)/) || [])[1];
     const lastPageCode = (jobsFor(LAST_PAGE)[0].href.match(/code=([^&]+)/) || [])[1];
     expect(page1Code !== lastPageCode, "requested code is not on the final page");
-    const started = await windowStub.jobHelperStartDetails([page1Code]);
+    const started = await startDetailsPromise;
     guard = 0;
     while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 40000) {
       await pump();
@@ -354,7 +380,7 @@ async function main() {
   }
 
   if (SCENARIO === "ids-unknown") {
-    const started = await windowStub.jobHelperStartDetails(["NOPE"]);
+    const started = await startDetailsPromise;
     expect(started === false, "unknown ids abort cleanly");
     expect(logs.some((l) => l.startsWith("DETAIL_IDS_NOT_IN_QUEUE")), "unknown ids reported");
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
@@ -362,14 +388,22 @@ async function main() {
   }
 
   if (SCENARIO === "detail-worker") {
+    // C: substantive bonus lines must never appear inside requirements
+    expect(!r.some((x) => (x.requirements || []).join(" ").includes("加分项")),
+      "requirements never contain the bonus section");
+    // detail page text is audit-only: no canonical title override field
+    expect(r.every((x) => x.detail_page_title && !("title" in x)),
+      "detail title recorded as audit-only detail_page_title");
     if (process.env.DUMP_RESULTS) {
       console.log("RESULTS " + JSON.stringify(r));
       console.log("NAVIGATIONS " + state.workerNavigations + " OPENS " + state.workerOpens);
     }
     expect(startDetails === true, "user action started the detail worker");
     expect(state.workerOpens === 1, "worker window created exactly once");
-    expect(r.length === 3, "one result per remaining detail");
-    expect(state.workerNavigations === 2, "worker navigated sequentially via assign");
+    expect(r.length === TOTAL_PAGES * PAGE_SIZE,
+      "one result per accumulated detail target");
+    expect(state.workerNavigations === TOTAL_PAGES * PAGE_SIZE - 1,
+      "worker navigated sequentially via assign");
     const allOk = r.every((x) => x.status === "SUCCESS" && x.code &&
       x.detail_url && x.body_text && x.full_jd);
     expect(allOk, "all detail results successful with JD text");
@@ -399,20 +433,16 @@ async function main() {
   }
 
   if (SCENARIO === "worker-closed") {
-    // the user closes the worker mid-run; the helper must not lose the queue
-    const interval = setInterval(() => {
-      if (state.worker && !state.worker.closed) {
-        state.worker.closed = true;   // simulate the user closing it
-        clearInterval(interval);
-      }
-    }, 5);
-    await pump(); await pump();
-    clearInterval(interval);
-    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 20000) {
+    // the user closes the worker mid-run, exactly once (injected into the
+    // helper source above); the helper must reopen and finish the queue
+    guard = 0;
+    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 60000) {
       await pump();
     }
-    expect(logs.some((l) => l === "DETAIL_WORKER_CLOSED"), "worker closed detected");
-    expect(r.some((x) => x.status === "SUCCESS"), "some details captured before close");
+    // self-healing: the helper detects the closed worker, reopens it and
+    // continues the queue without losing state
+    expect(state.workerOpens === 2, "worker reopened exactly once after close");
+    expect(r.every((x) => x.status === "SUCCESS"), "queue completed after the close");
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }

@@ -8,6 +8,8 @@ The verification stage itself never times out.
 """
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -80,6 +82,38 @@ def test_late_arriving_jd_is_waited_for_and_captured():
     proc = _run_scenario("late-jd")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_per_page_accumulation_log_reconciles_total():
+    proc = _run_scenario("resume-success")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PASS page 1 accumulated +50" in proc.stdout
+    assert "last page accumulated the tail and the grand total" in proc.stdout
+
+
+def test_substantive_bonus_kept_in_full_jd_not_requirements():
+    proc = _run_scenario("bonus")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_empty_bonus_and_tips_boilerplate_omitted():
+    proc = _run_scenario("bonus-none")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_detail_page_title_is_audit_only():
+    node = shutil.which("node")
+    harness = Path(__file__).resolve().parents[0] / "fixtures" / "n86_helper_resume_test.js"
+    env = {**os.environ, "DUMP_RESULTS": "1"}
+    proc2 = subprocess.run([node, str(harness), "detail-worker"], capture_output=True,
+                           text=True, env=env, timeout=120)
+    dump = [line for line in proc2.stdout.splitlines() if line.startswith("RESULTS")]
+    assert dump, "RESULTS emitted"
+    payload = json.loads(dump[0].split(" ", 1)[1])
+    assert all("detail_page_title" in x and "title" not in x
+               for x in payload), "detail titles are audit-only detail_page_title"
 
 
 def test_identity_mismatch_rejected_batch_continues():

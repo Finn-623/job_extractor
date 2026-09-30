@@ -398,7 +398,7 @@
 
   const extractJdSections = (text) => {
     const lines = String(text || "").split("\n");
-    const resp = [], req = [];
+    const resp = [], req = [], bonus = [];
     let bucket = null;
     for (const line of lines) {
       const stripped = line.trim();
@@ -408,12 +408,20 @@
       if (JD_REQ_HEADING.test(stripped)) { bucket = req; continue; }
       // a following labelled section ends the current bucket (e.g. the
       // 任职要求 bucket must not swallow 加分项/Tips/简历投递 boilerplate)
+      // 加分项 is its own labelled section: capture it separately so it is
+      // never swallowed by 任职要求 and can be appended to the full JD
+      if (/^加分项/.test(stripped)) { bucket = bonus; continue; }
       if (bucket && JD_SECTION_END.test(stripped)) { bucket = null; continue; }
       if (bucket) bucket.push(stripped);
     }
     const parts = [];
     if (resp.length) parts.push("岗位职责\n" + resp.join("\n"));
     if (req.length) parts.push("任职要求\n" + req.join("\n"));
+    // Substantive 加分项 content belongs in the full JD (a real part of the
+    // posting) but never inside 任职要求; "加分项：无" is omitted.
+    const bonusSubstantive = bonus.length &&
+      bonus[0] !== "无" && !/^无/.test(bonus[0]);
+    if (bonusSubstantive) parts.push("加分项\n" + bonus.join("\n"));
     return { responsibilities: resp, requirements: req,
              full_jd: parts.length ? parts.join("\n\n") : null };
   };
@@ -459,7 +467,9 @@
 
   const recordDetail = (target, sections, text) => {
     target.status = "SUCCESS";
-    detailResults.push({ code: target.code, title: target.title,
+    // ``detail_page_title`` is the detail anchor/page text: audit evidence
+    // only. The canonical job_title always comes from the List record.
+    detailResults.push({ code: target.code, detail_page_title: target.title,
       status: "SUCCESS", detail_url: target.url, body_text: text, ...sections });
   };
   const recordFailure = (target, code, reason) => {
@@ -629,7 +639,10 @@
     }
     pagesVisited += 1;
     console.log("page " + pageNo + " ready");
+    const beforeCollect = seenDetailCodes.size;
     collectDetailTargets();
+    console.log("page " + pageNo + " accumulated: +" +
+      (seenDetailCodes.size - beforeCollect) + " -> " + seenDetailCodes.size);
     // short initial settle so Page 1's list request reaches the Network layer
     if (pagesVisited === 1) {
       await sleep(INITIAL_SETTLE_MS);
