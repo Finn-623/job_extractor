@@ -30,7 +30,7 @@ from job_extractor.step94h_debug import append as append_step94h_debug, enabled 
 
 # ---- ID / URL evidence names (reuses the established field vocabulary) ----
 _ID_KEYS = ("postId", "post_id", "jobId", "job_id", "positionId", "position_id",
-            "positionCode", "position_code", "id", "recruitmentId")
+            "positionCode", "position_code", "code", "id", "recruitmentId")
 _URL_KEYS = ("detailUrl", "detail_url", "jobUrl", "job_url", "url", "applyUrl",
              "apply_url", "sourceUrl", "source_url", "link", "href", "path")
 # Keys we must never treat as a detail id (request ids, page tokens...).
@@ -39,6 +39,9 @@ _ID_EXCLUDE = re.compile(r"(?i)(^|_)(request|trace|token|nonce|timestamp|seed)($
 # candidate URLs from a campaign prefix + an id. Order is the probe order.
 _DETAIL_PATH_HINTS = ("pb/posDetail.html", "posDetail.html", "pb/positionDetail.html",
                       "positionDetail.html", "jobDetail.html", "jobdetail.html")
+# Route-style (extensionless) detail paths for SPA shells, joined at the
+# site origin.  Real evidence: list DOM anchors like /jobs/detail?code=...
+_DETAIL_ROUTE_HINTS = ("jobs/detail",)
 # Extra query params carried from the record when constructing candidates
 # (e.g. a postType=campus riding along with the postId).
 _CARRY_QUERY_KEYS = ("postType", "post_type", "recruitType", "recruit_type", "type")
@@ -197,7 +200,7 @@ def build_detail_url_candidates(list_url: str, record: dict, raw: Any = None,
                 joiner = "" if value.startswith("/") else "/"
                 add(f"{origin}/{joiner}{value.lstrip('/')}?" + urlencode(pairs))
                 break
-    # 4 — generic known detail-page filename patterns on the campaign prefix.
+    # 4 — generic known detail-page patterns.
     if campaign_prefix:
         prefix_path="/"+campaign_prefix.strip("/")+"/"
         prefix=urlunsplit((parts.scheme,parts.netloc,prefix_path,"",""))
@@ -205,6 +208,18 @@ def build_detail_url_candidates(list_url: str, record: dict, raw: Any = None,
         prefix = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     if not prefix.endswith("/"):
         prefix += "/"
+    # 4a — extensionless SPA route hints (e.g. /jobs/detail?code=...) join at
+    # the site origin: the list URL of a SPA shell is an API data route, not
+    # a page route, so route-style candidates must not be appended onto it.
+    # Applies only to API-style list paths (the /api/ convention) without a
+    # campaign prefix; campaign page routes keep rule 4's established order.
+    spa_route = (campaign_prefix is None and
+                 parts.path.lower().startswith("/api/") and
+                 not parts.path.lower().endswith((".html", ".htm", ".php", ".aspx")))
+    if spa_route:
+        origin = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+        for hint in _DETAIL_ROUTE_HINTS:
+            add(f"{origin}/{hint.lstrip('/')}?" + urlencode(pairs))
     for hint in _DETAIL_PATH_HINTS:
         add(f"{prefix}{hint}?" + urlencode(pairs))
     if same_page_candidate:
@@ -542,6 +557,17 @@ def render_detail_jobs(page_factory: Callable[[], Any], targets: list[DetailTarg
                                             diagnostic=diagnostic)
                 if outcome["ok"]:
                     sections = outcome["sections"]
+                    # Identity guard: the detail URL's stable id (e.g.
+                    # /jobs/detail?code=...) must belong to this job — a
+                    # mismatch must never fill JD content from another job.
+                    wanted = target.id_value
+                    landed = url if getattr(page, "url", None) is None else str(page.url)
+                    final_query = dict(parse_qsl(urlsplit(landed).query))
+                    got = final_query.get("code") if "code" in final_query else None
+                    if wanted and got is not None and got != wanted:
+                        target.failure_code = "JD_CODE_MISMATCH"
+                        target.failure_reason = f"detail page code {got} != job {wanted}"
+                        continue
                     if sections.get("responsibilities") or sections.get("requirements"):
                         _apply_sections(target.job, sections)
                         target.detail_url = url
