@@ -74,15 +74,20 @@
 
   // Only links that are actually rendered on the current page count as
   // "visible" — hidden/cached nodes must not pollute the stability signal.
-  const visibleIds = () => {
-    const ids = new Set();
+  // Single source of truth for "current page visible detail anchors":
+  // the page-settle signal and the accumulation collector must never query
+  // the DOM with different filters — stale/hidden previous-page nodes must
+  // not pollute either one.
+  const currentVisibleDetailTargets = () => {
+    const out = [];
     document.querySelectorAll(DETAIL_LINK_SELECTOR).forEach((a) => {
-      if (a.offsetParent !== null || a.getClientRects().length > 0) {
-        ids.add(a.href);
-      }
+      if (a.offsetParent === null && a.getClientRects().length === 0) return;
+      out.push(a);
     });
-    return ids;
+    return out;
   };
+  const visibleIds = () =>
+    new Set(currentVisibleDetailTargets().map((a) => a.href));
   const sameSet = (a, b) =>
     a.size === b.size && [...a].every((v) => b.has(v));
 
@@ -111,6 +116,7 @@
   console.log("PDD pagination helper started");
 
   // ---- Step 1: page size via the official size changer (DOM only) ----
+  let officialPageSize = null;
   try {
     const sizeChanger = document.querySelector(
       ".rocket-pagination-options-size-changer");
@@ -118,6 +124,7 @@
       ".rocket-pagination-options-size-changer .rocket-select-selection-item");
     const current = parseIntText(selected);
     if (!Number.isNaN(current)) {
+      officialPageSize = current;
       console.log("page size already max: " + current);
     } else {
       const changer = sizeChanger ||
@@ -135,6 +142,7 @@
       const target = options.find((el) => parseIntText(el) === max);
       if (!target) throw new Error("max option not found");
       target.click();
+      officialPageSize = max;
       // wait for the size change to settle (>= 2s) before paginating
       await sleep(CLICK_WAIT_MS);
       console.log("page size changed to: " + max);
@@ -371,8 +379,19 @@
   // earlier pages are long gone once pagination ends).
   const accumulatedDetailTargets = [];
   const seenDetailCodes = new Set();
-  const collectDetailTargets = () => {
-    for (const anchor of document.querySelectorAll(DETAIL_LINK_SELECTOR)) {
+  const collectDetailTargets = (pageNo) => {
+    // only the current page's actually-visible anchors — never the whole
+    // document (stale/hidden previous-page nodes must not be accumulated)
+    const visible = currentVisibleDetailTargets();
+    const v = visible.length;
+    console.log("page " + pageNo + " visible: " + v);
+    if (officialPageSize && v > officialPageSize) {
+      console.log("PAGE_TARGET_COUNT_INVALID page " + pageNo + " visible " + v +
+        " > page size " + officialPageSize);
+      return accumulatedDetailTargets.length;  // never accumulate polluted data
+    }
+    let newUnique = 0;
+    for (const anchor of visible) {
       let url = anchor.href;
       let code = null;
       try { code = new URL(url, location.href).searchParams.get("code"); } catch {}
@@ -384,9 +403,12 @@
           if (value === code) { idParam = key; break; }
         }
       } catch {}
+      newUnique += 1;
       accumulatedDetailTargets.push({ code, title: (anchor.textContent || "").trim(),
                                       url, idParam });
     }
+    console.log("page " + pageNo + " new_unique: +" + newUnique);
+    console.log("page " + pageNo + " accumulated: " + accumulatedDetailTargets.length);
     return accumulatedDetailTargets.length;
   };
   const buildDetailQueue = () => {
@@ -639,10 +661,7 @@
     }
     pagesVisited += 1;
     console.log("page " + pageNo + " ready");
-    const beforeCollect = seenDetailCodes.size;
-    collectDetailTargets();
-    console.log("page " + pageNo + " accumulated: +" +
-      (seenDetailCodes.size - beforeCollect) + " -> " + seenDetailCodes.size);
+    collectDetailTargets(pageNo);
     // short initial settle so Page 1's list request reaches the Network layer
     if (pagesVisited === 1) {
       await sleep(INITIAL_SETTLE_MS);

@@ -87,8 +87,8 @@ def test_late_arriving_jd_is_waited_for_and_captured():
 def test_per_page_accumulation_log_reconciles_total():
     proc = _run_scenario("resume-success")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "PASS page 1 accumulated +50" in proc.stdout
-    assert "last page accumulated the tail and the grand total" in proc.stdout
+    assert "PASS page 1 visible count" in proc.stdout
+    assert "PASS last page accumulated the tail" in proc.stdout
 
 
 def test_substantive_bonus_kept_in_full_jd_not_requirements():
@@ -114,6 +114,18 @@ def test_detail_page_title_is_audit_only():
     payload = json.loads(dump[0].split(" ", 1)[1])
     assert all("detail_page_title" in x and "title" not in x
                for x in payload), "detail titles are audit-only detail_page_title"
+
+
+def test_hidden_stale_anchors_never_accumulated():
+    proc = _run_scenario("hidden-stale")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_page_target_count_invalid_never_accumulates():
+    proc = _run_scenario("count-invalid")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
 
 
 def test_identity_mismatch_rejected_batch_continues():

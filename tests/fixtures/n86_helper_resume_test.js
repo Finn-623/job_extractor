@@ -48,20 +48,29 @@ const state = {
   workerBodyOverride: null,
 };
 
-function jobLink(page, index) {
+function jobLink(page, index, hidden) {
   const code = "T" + String(page).padStart(2, "0") + String(index).padStart(3, "0");
   return {
     textContent: "岗位 " + code,
     href: "https://careers.example.com/jobs/detail?code=" + code + "&lang=zh",
-    offsetParent: {},
-    getClientRects: () => [{}],
+    offsetParent: hidden ? null : {},
+    getClientRects: () => (hidden ? [] : [{}]),
   };
 }
 
 function jobsFor(page) {
   const out = [];
-  for (let i = 0; i < (SCENARIO !== "single-page" && SCENARIO !== "detail-worker" && page === LAST_PAGE ? 42 : PAGE_SIZE); i++) {
+  const count = (SCENARIO !== "single-page" && SCENARIO !== "detail-worker" &&
+                 page === LAST_PAGE) ? 42 : PAGE_SIZE;
+  for (let i = 0; i < count; i++) {
     out.push(jobLink(page, i));
+  }
+  // stale/hidden pollution: previous-page anchors retained in the DOM but
+  // hidden, plus hidden same-page duplicates — must never be accumulated
+  if (SCENARIO === "hidden-stale" || SCENARIO === "count-invalid") {
+    const extra = SCENARIO === "count-invalid" ? count : 7;
+    for (let i = 0; i < extra; i++) out.push(jobLink(page, count + i, true));
+    for (let i = 0; i < count; i++) out.push(jobLink(Math.max(1, page - 1), i, true));
   }
   return out;
 }
@@ -281,13 +290,18 @@ async function main() {
     "initial page refreshed");
   // per-page accumulation audit: each page logs its unique-code delta and
   // the running total (evidence for total reconciliation)
-  const accumLines = logs.filter((l) => l.startsWith("page ") && l.includes("accumulated: +"));
+  const newUniqueLines = logs.filter((l) => l.startsWith("page ") && l.includes(" new_unique: +"));
+  const accumLines = logs.filter((l) => l.startsWith("page ") && l.includes(" accumulated: "));
+  expect(newUniqueLines.length === TOTAL_PAGES, "every page logs its new_unique");
   expect(accumLines.length === TOTAL_PAGES, "every page logs its accumulation");
   if (SCENARIO === "resume-success") {
     // fixture: 50 links/page + 42 on the last page, dedupe by code
-    expect(accumLines[0].includes("+50 -> 50"), "page 1 accumulated +50");
-    expect(accumLines[accumLines.length - 1].includes("+42 -> " + (15 * 50 + 42)),
-      "last page accumulated the tail and the grand total");
+    expect(logs.some((l) => l === "page 1 visible: 50"), "page 1 visible count");
+    expect(logs.some((l) => l === "page 1 new_unique: +50"), "page 1 accumulated +50");
+    expect(logs.some((l) => l === "page " + TOTAL_PAGES + " new_unique: +42"),
+      "last page accumulated the tail");
+    expect(logs.some((l) => l === "page " + TOTAL_PAGES + " accumulated: " + (15 * 50 + 42)),
+      "last page grand total");
   }
 
   if (SCENARIO === "detail-worker" || SCENARIO === "warmup-verification") {
@@ -383,6 +397,25 @@ async function main() {
     const started = await startDetailsPromise;
     expect(started === false, "unknown ids abort cleanly");
     expect(logs.some((l) => l.startsWith("DETAIL_IDS_NOT_IN_QUEUE")), "unknown ids reported");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  if (SCENARIO === "hidden-stale") {
+    // page 1 renders 50 visible anchors + 7 hidden same-page + hidden
+    // previous-page ones: only the visible 50 may accumulate
+    expect(logs.some((l) => l === "page 1 visible: 50"), "visible count is 50");
+    expect(logs.some((l) => l === "page 1 new_unique: +50"), "+50 not +57");
+    expect(logs.some((l) => l === "page 1 accumulated: 50"), "accumulated 50");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  if (SCENARIO === "count-invalid") {
+    // visible anchors exceed the official page size: never accumulate
+    expect(logs.some((l) => l.startsWith("PAGE_TARGET_COUNT_INVALID page 1")),
+      "count invalid reported");
+    expect(!logs.some((l) => l.startsWith("page 1 new_unique:")), "no polluted accumulation");
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }
