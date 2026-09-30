@@ -470,18 +470,29 @@
     return true;
   };
 
-  window.jobHelperStartDetails = async () => {
+  // An optional id list (e.g. jobHelperStartDetails(["T018722", ...]))
+  // restricts the run to those stable ids; without one every pending item
+  // is processed exactly as before.
+  window.jobHelperStartDetails = async (onlyIds) => {
     if (detailQueueDone) { console.log("detail queue already finished"); return false; }
     if (!detailQueue.length) buildDetailQueue();
     if (!detailQueue.length) { console.log("DETAIL_QUEUE_EMPTY"); return false; }
-    const pending = detailQueue.filter((item) => item.status === "PENDING");
+    const wanted = Array.isArray(onlyIds) ? new Set(onlyIds.map(String)) : null;
+    const pending = detailQueue.filter((item) => item.status === "PENDING" &&
+      (!wanted || wanted.has(item.code)));
+    if (wanted && !pending.length) {
+      console.log("DETAIL_IDS_NOT_IN_QUEUE " + onlyIds.join(","));
+      return false;
+    }
     console.log("detail queue: " + pending.length + " pending / " +
-      detailQueue.length + " total");
+      detailQueue.length + " total" +
+      (wanted ? " (ids: " + onlyIds.join(",") + ")" : ""));
     if (!detailWorker || detailWorker.closed) {
       if (!openDetailWorker()) return false;
     }
     for (const target of detailQueue) {
       if (target.status !== "PENDING") continue;
+      if (wanted && !wanted.has(target.code)) continue;
       console.log("JD 详情：" + (detailQueue.indexOf(target) + 1) + " / " +
         detailQueue.length + " —— " + (target.title || target.code));
       if (!detailWorker || detailWorker.closed) {

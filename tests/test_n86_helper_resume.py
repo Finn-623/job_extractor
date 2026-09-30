@@ -76,6 +76,18 @@ def test_identity_mismatch_rejected_batch_continues():
     assert "PASS wrong landing never merged" in proc.stdout
 
 
+def test_ids_filter_processes_only_requested_codes():
+    proc = _run_scenario("ids-filter")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_ids_unknown_abort_cleanly():
+    proc = _run_scenario("ids-unknown")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
 def test_retry_failure_can_be_resumed_again_or_stopped_cleanly():
     proc = _run_scenario("retry-failure")
     assert proc.returncode == 0, proc.stdout + proc.stderr

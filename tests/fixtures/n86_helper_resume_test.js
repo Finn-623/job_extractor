@@ -322,6 +322,30 @@ async function main() {
     console.log("TAIL " + logs.filter((l) => l.startsWith("detail") || l.startsWith("JD") || l === "DETAIL_QUEUE_EMPTY").join(" || "));
   }
 
+  if (SCENARIO === "ids-filter") {
+    // explicit id list restricts the run to those stable ids
+    const started = await windowStub.jobHelperStartDetails(["T16000", "T16001"]);
+    guard = 0;
+    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 20000) {
+      await pump();
+    }
+    const r2 = results();
+    expect(started === true, "filtered run started");
+    expect(r2.length === 2, "only the requested ids processed");
+    expect(r2.every((x) => x.status === "SUCCESS" &&
+      (x.code === "T16000" || x.code === "T16001")), "only requested codes captured");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  if (SCENARIO === "ids-unknown") {
+    const started = await windowStub.jobHelperStartDetails(["NOPE"]);
+    expect(started === false, "unknown ids abort cleanly");
+    expect(logs.some((l) => l.startsWith("DETAIL_IDS_NOT_IN_QUEUE")), "unknown ids reported");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
   if (SCENARIO === "detail-worker") {
     if (process.env.DUMP_RESULTS) {
       console.log("RESULTS " + JSON.stringify(r));
