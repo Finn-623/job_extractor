@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 HEADERS = ["id", "title", "company", "location", "department", "education",
            "job_type", "publish_date", "responsibilities", "requirements",
-           "detail_url", "apply_url"]
+           "detail_url", "apply_url", "jd_enrichment_status"]
 
 _FORMULA_PREFIX = ("=", "+", "-", "@")
 
@@ -44,5 +44,6 @@ def export_jobs_csv(result: "CollectionResult", output_path: Path) -> Path:
                 _cell(job.recruitment_type), _cell(job.publish_date),
                 _cell(job.responsibilities), _cell(job.requirements),
                 _cell(job.detail_url), _cell(job.apply_url),
+                _cell(job.jd_enrichment_status),
             ])
     return output_path

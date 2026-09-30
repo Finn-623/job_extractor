@@ -10,8 +10,8 @@ from job_extractor.reporting.sanitize import ExcelSanitizeStats,safe_sheet_name
 
 logger=logging.getLogger(__name__)
 
-HEADERS=["序号","公司","岗位名称","Job ID","招聘类型","岗位类别","部门","工作地点","学历","专业","招聘人数","发布时间","岗位职责","任职要求","完整 JD","Detail URL","Apply URL","Source URL","数据完整性"]
-WIDTHS=[8,20,35,25,15,20,25,25,18,30,12,20,55,55,70,45,45,45,22]
+HEADERS=["序号","公司","岗位名称","Job ID","招聘类型","岗位类别","部门","工作地点","学历","专业","招聘人数","发布时间","岗位职责","任职要求","完整 JD","Detail URL","Apply URL","Source URL","数据完整性","JD 获取状态"]
+WIDTHS=[8,20,35,25,15,20,25,25,18,30,12,20,55,55,70,45,45,45,22,16]
 HEADER_FILL=PatternFill("solid",fgColor="1F4E78");SECTION_FILL=PatternFill("solid",fgColor="D9EAF7");THIN=Side(style="thin",color="B7C9D6")
 CELL_PLACEHOLDER="[EXPORT_ERROR]"
 
@@ -52,7 +52,7 @@ class ExcelReporter:
         for cell in jobs[1]:cell.font=Font(bold=True,color="FFFFFF");cell.fill=HEADER_FILL;cell.alignment=Alignment(horizontal="center");cell.border=Border(bottom=THIN)
         for index,job in enumerate(result.jobs,1):
             resp,_=truncate_excel(numbered(job.responsibilities));req,_=truncate_excel(numbered(job.requirements));full,_=truncate_excel(job.full_jd)
-            row=[index,job.company,job.job_title,job.job_id,job.recruitment_type,job.job_category,job.department,locations_text(job.locations),job.education,job.major,job.headcount,job.publish_date,resp,req,full,"查看岗位" if job.detail_url else None,"前往投递" if job.apply_url else None,"来源网页" if job.source_url else None,job_completeness(job)]
+            row=[index,job.company,job.job_title,job.job_id,job.recruitment_type,job.job_category,job.department,locations_text(job.locations),job.education,job.major,job.headcount,job.publish_date,resp,req,full,"查看岗位" if job.detail_url else None,"前往投递" if job.apply_url else None,"来源网页" if job.source_url else None,job_completeness(job),getattr(job, "jd_enrichment_status", None)]
             jobs.append([_safe_cell(x,stats) for x in row]);r=jobs.max_row;jobs.row_dimensions[r].height=45
             for col,url in ((16,job.detail_url),(17,job.apply_url),(18,job.source_url)):
                 if url:jobs.cell(r,col).hyperlink=url;jobs.cell(r,col).style="Hyperlink"

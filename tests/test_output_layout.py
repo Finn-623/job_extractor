@@ -104,7 +104,7 @@ def test_jobs_csv_single_line_cells(tmp_path):
         rows = list(csv.reader(handle))
     assert rows[0] == ["id", "title", "company", "location", "department", "education",
                        "job_type", "publish_date", "responsibilities", "requirements",
-                       "detail_url", "apply_url"]
+                       "detail_url", "apply_url", "jd_enrichment_status"]
     assert len(rows) == 3
     body = path.read_text(encoding="utf-8-sig")
     # Multi-line JD text flattened to one row per job (visible ⏎ separator, no stray newlines).

@@ -115,8 +115,18 @@ class Job(BaseModel):
     responsibilities: list[str] = Field(default_factory=list)
     requirements: list[str] = Field(default_factory=list)
     full_jd: str | None = None
+    # ``None`` is intentionally retained for artifacts created before N9.4.
+    # It is an unknown legacy lifecycle, never an implicit failure.
+    jd_enrichment: Literal["NOT_REQUESTED", "PENDING", "COMPLETE",
+                           "VERIFICATION_REQUIRED", "FAILED"] | None = None
     apply_url: str | None = None
     detail_url: str | None = None
+    # N9.4 JD on-demand enrichment lifecycle. None = legacy record: business
+    # layers derive NOT_REQUESTED (no credible full_jd) or COMPLETE (credible
+    # full_jd) — never backfill the stored field.
+    jd_enrichment_status: Literal[
+        "NOT_REQUESTED", "PENDING", "COMPLETE", "VERIFICATION_REQUIRED", "FAILED"
+    ] | None = None
     source_url: str
     publish_date: str | None = None
     raw_data: dict[str, Any] = Field(default_factory=dict)

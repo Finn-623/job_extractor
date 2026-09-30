@@ -24,8 +24,16 @@ def build_collection_summary(result: "CollectionResult", collection_mode: str) -
         "detail_method", "rendered_page_attempted", "user_curl_attempted",
         "list_only_used", "jd_success", "jd_failed", "jd_missing",
     ) if key in detail_resolution}
+    enrichment_counts = {key: 0 for key in (
+        "not_requested", "pending", "complete", "verification_required", "failed", "unknown"
+    )}
+    for job in result.jobs:
+        state = job.jd_enrichment
+        key = state.lower() if state is not None else "unknown"
+        enrichment_counts[key] += 1
     return {
         "company": result.company,
+        "jd_enrichment": enrichment_counts,
         "source_url": result.source_url,
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
