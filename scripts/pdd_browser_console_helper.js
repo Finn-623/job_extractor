@@ -541,8 +541,8 @@
   // Pause the detail queue for the site's own verification: the user
   // completes it manually, then resumes with jobHelperResume(); a stop
   // marks the remaining queue as STOPPED and finishes the run.
-  const pauseDetailQueue = async (pausedAt) => {
-    console.log("JD 详情：" + pausedAt + " / " + detailQueue.length +
+  const pauseDetailQueue = async (batchIndex, batchSize) => {
+    console.log("JD 详情：" + batchIndex + " / " + batchSize +
       " —— 暂停，等待验证。完成后输入 jobHelperResume() 继续。");
     const resumed = await new Promise((resolve) => { resumeResolver = resolve; });
     if (!resumed) {
@@ -601,7 +601,7 @@
         if (outcome === "STABLE") break;
         if (outcome === "DETAIL_WORKER_CLOSED") {
           console.log("DETAIL_WORKER_CLOSED");
-          if (!(await pauseDetailQueue(detailQueue.indexOf(target) + 1))) {
+          if (!(await pauseDetailQueue(batchIndex, batchSize))) {
             detailQueueDone = true;
             emitDetailResult();
             return false;
@@ -615,7 +615,7 @@
         if (outcome === "DETAIL_DOM_NOT_CREDIBLE" || outcome === "DETAIL_NAV_TIMEOUT") {
           // possible site verification or a slow page: pause and let the
           // user complete the site's own verification, then retry once
-          if (!(await pauseDetailQueue(detailQueue.indexOf(target) + 1))) {
+          if (!(await pauseDetailQueue(batchIndex, batchSize))) {
             detailQueueDone = true; emitDetailResult(); return false;
           }
         } else {

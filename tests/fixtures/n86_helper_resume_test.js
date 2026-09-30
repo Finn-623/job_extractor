@@ -10,15 +10,10 @@ let helperSource = fs.readFileSync(
   path.join(__dirname, "..", "..", "scripts", "pdd_browser_console_helper.js"),
   "utf8");
 const SCENARIO = process.argv[2] || "resume-success";
-if (process.env.HELPER_DEBUG || SCENARIO === "worker-closed") {
+if (process.env.HELPER_DEBUG) {
   helperSource = helperSource
     .replace('return "DETAIL_DOM_NOT_CREDIBLE";', 'console.log("[DBG DOM_NOT_CREDIBLE]"); return "DETAIL_DOM_NOT_CREDIBLE";')
-    .replace('if (Date.now() >= deadline) return "DETAIL_NAV_TIMEOUT";', 'if (Date.now() >= deadline) { console.log("[DBG NAV_TIMEOUT]"); return "DETAIL_NAV_TIMEOUT"; }')
-    .replace('if (workerLandedOk(target)) break;', 'console.log("[DBG landed=" + workerLandedOk(target) + " workerHref=" + (detailWorker.location && detailWorker.location.href) + "]"); if (workerLandedOk(target)) break;')
-    .replace('console.log("DETAIL_WORKER_CLOSED");', 'console.log("DETAIL_WORKER_CLOSED"); console.log("[DBG WORKER_CLOSED]");')
-    .replace('      const credible = text.length >= DETAIL_MIN_TEXT &&', 'console.log("[DBG poll len=" + text.length + "]");\n      const credible = text.length >= DETAIL_MIN_TEXT &&')
-    .replace('console.log("JD 详情：" + batchIndex + " / " + batchSize +',
-      'console.log("[CLOSE_INJECT] batchIndex=" + batchIndex); if (batchIndex === 3 && detailWorker) { detailWorker.closed = true; } console.log("JD 详情：" + batchIndex + " / " + batchSize +');
+    .replace('if (Date.now() >= deadline) return "DETAIL_NAV_TIMEOUT";', 'if (Date.now() >= deadline) { console.log("[DBG NAV_TIMEOUT]"); return "DETAIL_NAV_TIMEOUT"; }');
 }
 
 let FAIL_PAGE = 10, TOTAL_PAGES = 16, PAGE_SIZE = 50;
@@ -202,6 +197,13 @@ function makeWorkerWindow(startUrl) {
           }
           self._page = url;
           state.workerNavigations += 1;
+          // simulate the user closing the worker mid-run, once, right after
+          // the second navigation (the third queue item starts)
+          if (SCENARIO === "worker-closed" && !state.workerClosedOnce &&
+              state.workerNavigations === 1) {
+            state.workerClosedFired = true;
+            self.closed = true;
+          }
         },
       };
     },
@@ -247,6 +249,7 @@ function expect(condition, label) {
   else { console.log("FAIL " + label); failures += 1; }
 }
 const pump = async () => new Promise((resolve) => setImmediate(resolve));
+
 const readyPages = () => logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length;
 const results = () => (windowStub.__JOB_HELPER_RESULT__ || { detail_results: [] }).detail_results;
 
@@ -414,14 +417,25 @@ async function main() {
   guard = 0;
   if (SCENARIO === "worker-blocked") state.popupBlocked = true;
   let startDetailsPromise = null;
-  let idsFilterPage1Code = null;
+  let idsFilterPage1Code = null, idsFilterPage2Code = null, idsFilterBatchSize = 0;
   if (SCENARIO === "identity-mismatch") {
     const firstCode = (jobsFor(LAST_PAGE)[0].href.match(/code=([^&]+)/) || [])[1];
     state.workerRedirect = { forCode: firstCode, landingCode: "T099999" };
     startDetailsPromise = windowStub.jobHelperStartDetails();
-  } else if (SCENARIO === "ids-filter") {
+  } else if (SCENARIO === "ids-filter" || SCENARIO === "ids-pause") {
     idsFilterPage1Code = (jobsFor(1)[0].href.match(/code=([^&]+)/) || [])[1];
-    startDetailsPromise = windowStub.jobHelperStartDetails([idsFilterPage1Code]);
+    idsFilterBatchSize = 1;
+    if (SCENARIO === "ids-pause") {
+      // two filtered jobs (page 1 code + page 2 code); page 2 needs
+      // verification so the pause fires mid-batch
+      idsFilterPage2Code = (jobsFor(2)[0].href.match(/code=([^&]+)/) || [])[1];
+      idsFilterBatchSize = 2;
+      state.verified = false;
+      startDetailsPromise = windowStub.jobHelperStartDetails(
+        [idsFilterPage1Code, idsFilterPage2Code]);
+    } else {
+      startDetailsPromise = windowStub.jobHelperStartDetails([idsFilterPage1Code]);
+    }
   } else if (SCENARIO === "ids-unknown") {
     startDetailsPromise = windowStub.jobHelperStartDetails(["NOPE"]);
   } else {
@@ -441,6 +455,39 @@ async function main() {
   if (process.env.DETAIL_DEBUG) {
     console.log("DUMP " + logs.join(" || "));
     console.log("TAIL " + logs.filter((l) => l.startsWith("detail") || l.startsWith("JD") || l === "DETAIL_QUEUE_EMPTY").join(" || "));
+  }
+
+  if (SCENARIO === "ids-pause") {
+    // filtered batch (2 jobs): a verification pause on item 2 must use the
+    // filtered batch context (2 / 2), never the global queue index
+    state.verified = false;
+    const started = await windowStub.jobHelperStartDetails([idsFilterPage1Code]);
+    guard = 0;
+    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 60000) {
+      await pump();
+      if (logs.some((l) => l.includes("完成后输入 jobHelperResume() 继续"))) {
+        logs.push("__RESUME_FIRED__");
+        state.verified = true;
+        windowStub.jobHelperResume();
+      }
+    }
+    const r2 = results();
+    expect(started === true, "filtered run started");
+    const pauseLine = logs.find((l) => l.includes("暂停，等待验证"));
+    expect(pauseLine && pauseLine.includes("/ " + idsFilterBatchSize + " "),
+      "pause progress uses the filtered batch size");
+    expect(!pauseLine || !pauseLine.includes("787"), "pause never falls back to the global total");
+    expect(r2.every((x) => x.status === "SUCCESS"), "recovered run completes");
+    // pause used the filtered batch context: (2 / 2) for the second job
+    expect(logs.some((l) => l.startsWith("JD 详情：2 / 2 —— 暂停，等待验证")),
+      "pause progress uses the filtered batch context");
+    expect(r2.every((x) => x.code === idsFilterPage1Code ||
+      x.code === idsFilterPage2Code), "identity unchanged across the resume");
+    const successOrder = logs.filter((l) => l.startsWith("✓ JD captured"))
+      .map((l) => l.includes(idsFilterPage2Code));
+    expect(successOrder.includes(true), "second job succeeded after resume");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
   }
 
   if (SCENARIO === "ids-filter") {
