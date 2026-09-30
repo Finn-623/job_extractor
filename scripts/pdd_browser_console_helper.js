@@ -346,6 +346,20 @@
   const JD_RESP_HEADING = /^(岗位职责|工作职责|职位职责|职责描述|工作内容|主要职责|Responsibilities)\s*$/m;
   const JD_REQ_HEADING = /^(任职要求|任职资格|岗位要求|职位要求|招聘要求|基本要求|Requirements|Qualifications)\s*$/m;
   const JD_STOP_LINE = /^(©|Copyright|分享|收藏|打印|返回|关闭|首页)/i;
+  // Page boilerplate that terminates a JD section (next labelled block or
+  // page chrome) — aligned with the Python extractor's stop semantics.
+  const JD_SECTION_END = /^(加分项|加分要求|Tips?\b|福利|温馨提示|简历投递|邮件提示|投递方式|Copyright|分享|收藏|打印|返回|关闭)/i;
+  // A parsed section is credible when it holds substantive lines: not just
+  // headings/boilerplate, and enough real content (length + lines).
+  const jdSectionCredible = (lines) => {
+    if (!lines || !lines.length) return false;
+    const joined = lines.join(" ");
+    return joined.length >= 25 && lines.length >= 2;
+  };
+  const jdSectionsCredible = (sections) => {
+    const resp = sections.responsibilities, req = sections.requirements;
+    return jdSectionCredible(resp) && jdSectionCredible(req);
+  };
 
   const detailQueue = [];
   const detailResults = [];
@@ -392,6 +406,9 @@
       if (JD_STOP_LINE.test(stripped)) { bucket = null; continue; }
       if (JD_RESP_HEADING.test(stripped)) { bucket = resp; continue; }
       if (JD_REQ_HEADING.test(stripped)) { bucket = req; continue; }
+      // a following labelled section ends the current bucket (e.g. the
+      // 任职要求 bucket must not swallow 加分项/Tips/简历投递 boilerplate)
+      if (bucket && JD_SECTION_END.test(stripped)) { bucket = null; continue; }
       if (bucket) bucket.push(stripped);
     }
     const parts = [];
@@ -420,6 +437,9 @@
     }
     if (Date.now() >= deadline) return "DETAIL_NAV_TIMEOUT";
     if (!workerLandedOk(target)) return "DETAIL_IDENTITY_MISMATCH";
+    // Stability requires CREDIBLE parsed JD sections (not just a stable
+    // shell): the parsed responsibilities/requirements must hold substantive
+    // content before consecutive-identical samples count as success.
     let lastText = null;
     while (Date.now() < deadline) {
       if (detailWorker.closed) return "DETAIL_WORKER_CLOSED";
@@ -427,9 +447,10 @@
       try {
         text = detailWorker.document.body ? (detailWorker.document.body.innerText || "") : "";
       } catch { await sleep(DETAIL_POLL_MS); continue; }
-      const credible = text.length >= DETAIL_MIN_TEXT &&
-        (JD_RESP_HEADING.test(text) || JD_REQ_HEADING.test(text));
-      if (credible && text === lastText) return "STABLE";
+      if (text.length < DETAIL_MIN_TEXT) { await sleep(DETAIL_POLL_MS); continue; }
+      const sections = extractJdSections(text);
+      if (!jdSectionsCredible(sections)) { lastText = null; await sleep(DETAIL_POLL_MS); continue; }
+      if (lastText !== null && text === lastText) return "STABLE";
       lastText = text;
       await sleep(DETAIL_POLL_MS);
     }
@@ -497,14 +518,17 @@
     console.log("detail queue: " + pending.length + " pending / " +
       detailQueue.length + " total" +
       (wanted ? " (ids: " + onlyIds.join(",") + ")" : ""));
+    const batchSize = pending.length;
     if (!detailWorker || detailWorker.closed) {
       if (!openDetailWorker()) return false;
     }
+    let batchIndex = 0;
     for (const target of detailQueue) {
       if (target.status !== "PENDING") continue;
       if (wanted && !wanted.has(target.code)) continue;
-      console.log("JD 详情：" + (detailQueue.indexOf(target) + 1) + " / " +
-        detailQueue.length + " —— " + (target.title || target.code));
+      batchIndex += 1;
+      console.log("JD 详情：" + batchIndex + " / " + batchSize +
+        " —— " + (target.title || target.code));
       if (!detailWorker || detailWorker.closed) {
         if (!openDetailWorker()) { detailQueueDone = true; emitDetailResult(); return false; }
       }

@@ -169,9 +169,16 @@ function makeWorkerWindow(startUrl) {
       const landing = state.workerRedirect && state.workerRedirect.forCode === code
         ? state.workerRedirect.landingCode : code;
       const failed = VERIFIED_PAGES[landing] && !state.verified;
-      const bodyText = state.workerBodyOverride || (failed
+      let bodyText = state.workerBodyOverride || (failed
         ? "首页 商家入驻 很遗憾，您要访问的职位已过期或不存在 版权所有"
         : JD_TEXT + " 岗位 " + landing);
+      const evolve = state.workerEvolve && state.workerEvolve[code];
+      if (evolve) bodyText = bodyText.replace("岗位职责", evolve).slice(0, 400);
+      if (state.shellThenReal && state.shellThenReal[code] &&
+          state.workerPolls < state.shellThenReal[code]) {
+        bodyText = "岗位职责\n任职要求\n加分项\n无\nTips: 完善简历有助于提高投递成功率。\n简历投递\n邮件提示：请留意站内信通知。\nCopyright © example.com 版权所有";
+      }
+      state.workerPolls = (state.workerPolls || 0) + 1;
       return { body: { get innerText() { return bodyText; } } };
     },
   };
@@ -340,6 +347,8 @@ async function main() {
     expect(r2.length === 1, "only the requested id processed");
     expect(r2.every((x) => x.status === "SUCCESS" && x.code === page1Code),
       "page-1 code captured from the accumulated list");
+    expect(logs.some((l) => l.startsWith("JD 详情：1 / 1 ——")),
+      "batch progress uses the filtered batch size");
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }

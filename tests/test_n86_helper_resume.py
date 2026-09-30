@@ -70,6 +70,18 @@ def test_worker_popup_blocked_reports_and_recovers():
     assert "SCENARIO_ALL_PASS" in proc.stdout
 
 
+def test_shell_only_never_falsely_succeeds():
+    proc = _run_scenario("shell-only")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_late_arriving_jd_is_waited_for_and_captured():
+    proc = _run_scenario("late-jd")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
 def test_identity_mismatch_rejected_batch_continues():
     proc = _run_scenario("identity-mismatch")
     assert proc.returncode == 0, proc.stdout + proc.stderr
