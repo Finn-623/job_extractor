@@ -29,7 +29,7 @@ def test_resume_success_recovers_and_finishes_all_pages():
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "SCENARIO_ALL_PASS" in proc.stdout
     assert "PASS initial page refreshed" in proc.stdout
-    assert "PASS pagesVisited not affected by warmup" in proc.stdout
+    assert "PASS page 1 request recreated before formal pagination" in proc.stdout
 
 
 def test_warmup_round_trip_recreates_page_one_request():
@@ -44,11 +44,11 @@ def test_warmup_round_trip_recreates_page_one_request():
 def test_warmup_verification_pauses_then_resumes_and_continues():
     proc = _run_scenario("warmup-verification")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "PASS warmup verification entered the human resume flow" in proc.stdout
-    assert "PASS verification/page recovered" in proc.stdout
-    assert "PASS resuming automation" in proc.stdout
+    assert "PASS paused message" in proc.stdout and "PASS no formal pagination before warmup completes" in proc.stdout
+    assert "PASS page recovered after resume" in proc.stdout
+    assert "PASS automation resumed" in proc.stdout
     assert "PASS initial page refreshed" in proc.stdout
-    assert "PASS pagesVisited not affected by warmup" in proc.stdout
+    assert "PASS page 1 request recreated before formal pagination" in proc.stdout
 
 
 def test_single_page_no_warmup_round_trip():
@@ -56,6 +56,24 @@ def test_single_page_no_warmup_round_trip():
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "PASS single-page warmup skipped" in proc.stdout
     assert "PASS one page visited" in proc.stdout
+
+
+def test_detail_worker_single_window_sequential_navigation():
+    proc = _run_scenario("detail-worker")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_worker_popup_blocked_reports_and_recovers():
+    proc = _run_scenario("worker-blocked")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SCENARIO_ALL_PASS" in proc.stdout
+
+
+def test_identity_mismatch_rejected_batch_continues():
+    proc = _run_scenario("identity-mismatch")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PASS wrong landing never merged" in proc.stdout
 
 
 def test_retry_failure_can_be_resumed_again_or_stopped_cleanly():

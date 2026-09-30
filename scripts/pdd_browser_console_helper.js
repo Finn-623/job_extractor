@@ -67,11 +67,16 @@
     if (next.getAttribute("aria-disabled") === "true") return true;
     return false;
   };
+  // ---- site evidence (single point; PDD is the first validated fixture) ----
+  // List DOM anchors carry the detail route + stable id. The generic detail
+  // worker below only consumes this evidence; it never hardcodes a hostname.
+  const DETAIL_LINK_SELECTOR = "a[href*='/jobs/detail?code=']";
+
   // Only links that are actually rendered on the current page count as
   // "visible" — hidden/cached nodes must not pollute the stability signal.
   const visibleIds = () => {
     const ids = new Set();
-    document.querySelectorAll("a[href*='/jobs/detail?code=']").forEach((a) => {
+    document.querySelectorAll(DETAIL_LINK_SELECTOR).forEach((a) => {
       if (a.offsetParent !== null || a.getClientRects().length > 0) {
         ids.add(a.href);
       }
@@ -326,6 +331,242 @@
   } catch (error) {
     console.log("WARMUP_SKIPPED " + (error && error.message ? error.message : error));
   }
+
+
+  // ---- generic detail worker: reusable child window + DOM JD capture ----
+  // One worker window is created by an explicit user action; subsequent
+  // targets navigate that same window with location.assign (verified on a
+  // real site: same-origin child DOM stays readable from the controller).
+  // Identity guard: the worker URL's stable-id query param must equal the
+  // queue item's id before any JD content is read or merged.
+  const DETAIL_WORKER_NAME = "jobHelperDetail";
+  const DETAIL_NAV_TIMEOUT_MS = 25000;
+  const DETAIL_POLL_MS = 400;
+  const DETAIL_MIN_TEXT = 80;
+  const JD_RESP_HEADING = /^(岗位职责|工作职责|职位职责|职责描述|工作内容|主要职责|Responsibilities)\s*$/m;
+  const JD_REQ_HEADING = /^(任职要求|任职资格|岗位要求|职位要求|招聘要求|基本要求|Requirements|Qualifications)\s*$/m;
+  const JD_STOP_LINE = /^(©|Copyright|分享|收藏|打印|返回|关闭|首页)/i;
+
+  const detailQueue = [];
+  const detailResults = [];
+  let detailWorker = null;
+  let detailQueueDone = false;
+
+  const buildDetailQueue = () => {
+    const seen = new Set();
+    for (const anchor of document.querySelectorAll(DETAIL_LINK_SELECTOR)) {
+      let url = anchor.href;
+      let code = null;
+      try { code = new URL(url, location.href).searchParams.get("code"); } catch {}
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      let idParam = "code";
+      try {
+        for (const [key, value] of new URL(url, location.href).searchParams) {
+          if (value === code) { idParam = key; break; }
+        }
+      } catch {}
+      detailQueue.push({ code, title: (anchor.textContent || "").trim(),
+                         url, idParam, status: "PENDING" });
+    }
+    return detailQueue.length;
+  };
+
+  const extractJdSections = (text) => {
+    const lines = String(text || "").split("\n");
+    const resp = [], req = [];
+    let bucket = null;
+    for (const line of lines) {
+      const stripped = line.trim();
+      if (!stripped) continue;
+      if (JD_STOP_LINE.test(stripped)) { bucket = null; continue; }
+      if (JD_RESP_HEADING.test(stripped)) { bucket = resp; continue; }
+      if (JD_REQ_HEADING.test(stripped)) { bucket = req; continue; }
+      if (bucket) bucket.push(stripped);
+    }
+    const parts = [];
+    if (resp.length) parts.push("岗位职责\n" + resp.join("\n"));
+    if (req.length) parts.push("任职要求\n" + req.join("\n"));
+    return { responsibilities: resp, requirements: req,
+             full_jd: parts.length ? parts.join("\n\n") : null };
+  };
+
+  const workerLandedOk = (target) => {
+    try {
+      const u = new URL(detailWorker.location.href);
+      const wanted = new URL(target.url, location.href);
+      return u.origin === wanted.origin &&
+        u.pathname === wanted.pathname &&
+        u.searchParams.get(target.idParam) === target.code;
+    } catch { return false; }
+  };
+
+  const waitDetailStable = async (target) => {
+    const deadline = Date.now() + DETAIL_NAV_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (detailWorker.closed) return "DETAIL_WORKER_CLOSED";
+      if (workerLandedOk(target)) break;
+      await sleep(DETAIL_POLL_MS);
+    }
+    if (Date.now() >= deadline) return "DETAIL_NAV_TIMEOUT";
+    if (!workerLandedOk(target)) return "DETAIL_IDENTITY_MISMATCH";
+    let lastText = null;
+    while (Date.now() < deadline) {
+      if (detailWorker.closed) return "DETAIL_WORKER_CLOSED";
+      let text = "";
+      try {
+        text = detailWorker.document.body ? (detailWorker.document.body.innerText || "") : "";
+      } catch { await sleep(DETAIL_POLL_MS); continue; }
+      const credible = text.length >= DETAIL_MIN_TEXT &&
+        (JD_RESP_HEADING.test(text) || JD_REQ_HEADING.test(text));
+      if (credible && text === lastText) return "STABLE";
+      lastText = text;
+      await sleep(DETAIL_POLL_MS);
+    }
+    return "DETAIL_DOM_NOT_CREDIBLE";
+  };
+
+  const recordDetail = (target, sections, text) => {
+    target.status = "SUCCESS";
+    detailResults.push({ code: target.code, title: target.title,
+      status: "SUCCESS", detail_url: target.url, body_text: text, ...sections });
+  };
+  const recordFailure = (target, code, reason) => {
+    target.status = "FAILED";
+    target.failure_code = code;
+    target.failure_reason = reason;
+    detailResults.push(target);
+  };
+
+  const openDetailWorker = () => {
+    const first = detailQueue.find((item) => item.status === "PENDING");
+    if (!first) return false;
+    detailWorker = window.open(first.url, DETAIL_WORKER_NAME);
+    if (!detailWorker) {
+      console.log("DETAIL_WORKER_BLOCKED");
+      console.log("请在浏览器中允许本站点的弹窗后，再次输入 jobHelperStartDetails() 继续。");
+      return false;
+    }
+    return true;
+  };
+
+  // Pause the detail queue for the site's own verification: the user
+  // completes it manually, then resumes with jobHelperResume(); a stop
+  // marks the remaining queue as STOPPED and finishes the run.
+  const pauseDetailQueue = async (pausedAt) => {
+    console.log("JD 详情：" + pausedAt + " / " + detailQueue.length +
+      " —— 暂停，等待验证。完成后输入 jobHelperResume() 继续。");
+    const resumed = await new Promise((resolve) => { resumeResolver = resolve; });
+    if (!resumed) {
+      for (const item of detailQueue) {
+        if (item.status === "PENDING") {
+          item.status = "STOPPED";
+          detailResults.push({ code: item.code, detail_url: item.url,
+                               status: "STOPPED" });
+        }
+      }
+      return false;
+    }
+    return true;
+  };
+
+  window.jobHelperStartDetails = async () => {
+    if (detailQueueDone) { console.log("detail queue already finished"); return false; }
+    if (!detailQueue.length) buildDetailQueue();
+    if (!detailQueue.length) { console.log("DETAIL_QUEUE_EMPTY"); return false; }
+    const pending = detailQueue.filter((item) => item.status === "PENDING");
+    console.log("detail queue: " + pending.length + " pending / " +
+      detailQueue.length + " total");
+    if (!detailWorker || detailWorker.closed) {
+      if (!openDetailWorker()) return false;
+    }
+    for (const target of detailQueue) {
+      if (target.status !== "PENDING") continue;
+      console.log("JD 详情：" + (detailQueue.indexOf(target) + 1) + " / " +
+        detailQueue.length + " —— " + (target.title || target.code));
+      if (!detailWorker || detailWorker.closed) {
+        if (!openDetailWorker()) { detailQueueDone = true; emitDetailResult(); return false; }
+      }
+      let outcome = "DETAIL_NAV_TIMEOUT";
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) {
+          console.log("retrying detail " + target.code + " after resume");
+        }
+        if (!workerLandedOk(target)) {
+          detailWorker.location.assign(target.url);
+        }
+        outcome = await waitDetailStable(target);
+        if (outcome === "STABLE") break;
+        if (outcome === "DETAIL_WORKER_CLOSED") {
+          console.log("DETAIL_WORKER_CLOSED");
+          if (!(await pauseDetailQueue(detailQueue.indexOf(target) + 1))) {
+            detailQueueDone = true;
+            emitDetailResult();
+            return false;
+          }
+          if (!openDetailWorker()) {
+            detailQueueDone = true; emitDetailResult(); return false;
+          }
+          attempt -= 1;  // reopening does not consume the retry budget
+          continue;
+        }
+        if (outcome === "DETAIL_DOM_NOT_CREDIBLE" || outcome === "DETAIL_NAV_TIMEOUT") {
+          // possible site verification or a slow page: pause and let the
+          // user complete the site's own verification, then retry once
+          if (!(await pauseDetailQueue(detailQueue.indexOf(target) + 1))) {
+            detailQueueDone = true; emitDetailResult(); return false;
+          }
+        } else {
+          break;  // identity mismatch: no retry helps
+        }
+      }
+      if (outcome !== "STABLE") {
+        recordFailure(target, outcome,
+          outcome === "DETAIL_IDENTITY_MISMATCH"
+            ? "worker URL stable id does not match the queue item"
+            : "detail page did not reach a credible JD DOM");
+        continue;
+      }
+      let text = "";
+      try {
+        text = detailWorker.document.body ? (detailWorker.document.body.innerText || "") : "";
+      } catch (exc) {
+        recordFailure(target, "DETAIL_DOM_NOT_READABLE", String(exc));
+        continue;
+      }
+      if (!workerLandedOk(target)) {
+        recordFailure(target, "DETAIL_IDENTITY_MISMATCH", "worker URL changed before read");
+        continue;
+      }
+      const sections = extractJdSections(text);
+      if (!sections.full_jd) {
+        recordFailure(target, "DETAIL_DOM_NOT_CREDIBLE", "no JD sections extracted");
+        continue;
+      }
+      recordDetail(target, sections, text);
+      console.log("✓ JD captured: " + target.code +
+        " (职责 " + sections.responsibilities.length + " 行 / 要求 " +
+        sections.requirements.length + " 行)");
+    }
+    detailQueueDone = true;
+    emitDetailResult();
+    return true;
+  };
+
+  const emitDetailResult = () => {
+    const summary = {
+      list_pages: pagesVisited,
+      detail_results: detailResults,
+      pending: detailQueue.filter((item) => item.status === "PENDING").length,
+    };
+    window.__JOB_HELPER_RESULT__ = summary;
+    try {
+      console.log("JOB_HELPER_RESULT_JSON " + JSON.stringify(summary));
+    } catch {}
+    const ok = detailResults.filter((r) => r.status === "SUCCESS").length;
+    console.log("detail capture complete: " + ok + " success / " +
+      (detailResults.length - ok) + " failed/stopped");
+  };
 
   // ---- Step 2: adaptive pagination via the official next control ----
   let pagesVisited = 0;

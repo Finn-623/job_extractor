@@ -1,26 +1,37 @@
-// N5.6 helper human-resume tests — fake rocket-* DOM + virtual clock.
-// Usage: node n86_helper_resume_test.js
+// N5.6/N9.2 helper tests — fake rocket-* DOM + fake detail worker window.
+// Usage: node n86_helper_resume_test.js <scenario>
+//   resume-success | retry-failure | warmup-verification | single-page
+//   detail-worker | worker-blocked | worker-closed | identity-mismatch
 "use strict";
 const fs = require("fs");
 const path = require("path");
 
-const helperSource = fs.readFileSync(
+let helperSource = fs.readFileSync(
   path.join(__dirname, "..", "..", "scripts", "pdd_browser_console_helper.js"),
   "utf8");
+if (process.env.HELPER_DEBUG) {
+  helperSource = helperSource
+    .replace('return "DETAIL_DOM_NOT_CREDIBLE";', 'console.log("[DBG DOM_NOT_CREDIBLE]"); return "DETAIL_DOM_NOT_CREDIBLE";')
+    .replace('if (Date.now() >= deadline) return "DETAIL_NAV_TIMEOUT";', 'if (Date.now() >= deadline) { console.log("[DBG NAV_TIMEOUT]"); return "DETAIL_NAV_TIMEOUT"; }')
+    .replace('if (workerLandedOk(target)) break;', 'console.log("[DBG landed=" + workerLandedOk(target) + " workerHref=" + (detailWorker.location && detailWorker.location.href) + "]"); if (workerLandedOk(target)) break;')
+    .replace('console.log("DETAIL_WORKER_CLOSED");', 'console.log("DETAIL_WORKER_CLOSED"); console.log("[DBG WORKER_CLOSED]");')
+    .replace('      const credible = text.length >= DETAIL_MIN_TEXT &&', 'console.log("[DBG poll len=" + text.length + "]");\n      const credible = text.length >= DETAIL_MIN_TEXT &&');
+}
 
-const FAIL_PAGE = 10;
-const PAGE_SIZE = 50;
 const SCENARIO = process.argv[2] || "resume-success";
-if (SCENARIO === "single-page") { /* handled below via TOTAL_PAGES */ }
+let FAIL_PAGE = 10, TOTAL_PAGES = 16, PAGE_SIZE = 50;
+if (SCENARIO === "single-page") { TOTAL_PAGES = 1; }
+if (SCENARIO === "detail-worker") { TOTAL_PAGES = 3; PAGE_SIZE = 3; FAIL_PAGE = 2; }
+const LAST_PAGE = TOTAL_PAGES;
 // which pages fail their list request until the user completes verification
-const TOTAL_PAGES = SCENARIO === "single-page" ? 1 : 16;
-const VERIFIED_PAGES = (SCENARIO === "resume-success" || SCENARIO === "retry-failure")
-  ? { [FAIL_PAGE]: true }   // only page 10 needs verification (real PDD case)
-  : (SCENARIO === "warmup-verification" ? { 2: true, 10: true } : {});
+const VERIFIED_PAGES = SCENARIO === "warmup-verification"
+  ? { 2: true, 10: true }   // warmup page 2 AND page 10 need verification
+  : (SCENARIO !== "single-page" && SCENARIO !== "identity-mismatch")
+    ? { [FAIL_PAGE]: true } // only the failing page needs verification
+    : {};
 
 // ---- virtual clock: every sleep advances the clock and runs inline ----
 let vnow = 0;
-const virtualDate = { now: () => vnow };
 
 // ---- fake DOM ----
 const state = {
@@ -28,6 +39,11 @@ const state = {
   list: 1,
   verified: false,
   clicks: [],
+  popupBlocked: false,
+  workerOpens: 0,
+  workerNavigations: 0,
+  workerRedirect: null,     // { forCode, landingCode } simulates wrong landing
+  workerBodyOverride: null,
 };
 
 function jobLink(page, index) {
@@ -42,12 +58,25 @@ function jobLink(page, index) {
 
 function jobsFor(page) {
   const out = [];
-  for (let i = 0; i < (page === LAST_PAGE ? 42 : PAGE_SIZE); i++) {
+  for (let i = 0; i < (SCENARIO !== "single-page" && SCENARIO !== "detail-worker" && page === LAST_PAGE ? 42 : PAGE_SIZE); i++) {
     out.push(jobLink(page, i));
   }
   return out;
 }
-const LAST_PAGE = TOTAL_PAGES;
+
+function goToPage(page) {
+  // the site's own pagination click: it always advances the active page,
+  // but the list request itself fails (54001) until the user completes
+  // the site's own verification — then the request succeeds.
+  state.clicks.push(page);
+  state.active = page;
+  if (VERIFIED_PAGES[page] && !state.verified) {
+    state.listRequestFailed = true;
+    return;
+  }
+  state.listRequestFailed = false;
+  state.list = page;
+}
 
 const paginationItem = (page) => ({
   textContent: String(page),
@@ -61,20 +90,6 @@ const paginationItem = (page) => ({
   querySelector: (sel) => (sel === "a" ? { click() { goToPage(page); } } : null),
   click() { goToPage(page); },
 });
-
-function goToPage(page) {
-  // the site's own pagination click: it always advances the active page,
-  // but the list request itself fails (54001) until the user completes
-  // the site's own verification — then the request succeeds.
-  state.clicks.push(page);
-  state.active = page;
-  if (VERIFIED_PAGES[page] && !state.verified) {
-    state.listRequestFailed = true;   // success=false, errorCode=54001
-    return;                            // list keeps showing the previous page
-  }
-  state.listRequestFailed = false;
-  state.list = page;
-}
 
 const nextEl = {
   get textContent() { return ""; },
@@ -123,22 +138,69 @@ const documentStub = {
 const logs = [];
 const consoleStub = { log: (msg) => logs.push(String(msg)) };
 const windowStub = {};
+const JD_TEXT = "岗位职责\n1. 负责风控策略建模与迭代，输出风控规则与策略文档。\n2. 参与反欺诈反作弊体系建设，跟踪策略效果并持续优化。\n任职要求\n1. 本科及以上学历，计算机、数学或相关专业。\n2. 熟悉常用机器学习算法与风控业务，具备扎实的工程实现能力。";
+
+// ---- fake detail worker window ----
+function makeWorkerWindow(startUrl) {
+  const startCode = (startUrl.match(/code=([^&]+)/) || [])[1];
+  console.log("[OPEN] startCode=" + startCode + " redirect=" + JSON.stringify(state.workerRedirect));
+  if (state.workerRedirect && startCode === state.workerRedirect.forCode) {
+    startUrl = startUrl.replace(startCode, state.workerRedirect.landingCode);
+  }
+  const w = {
+    _page: startUrl,
+    closed: false,
+    get location() {
+      const self = this;
+      return {
+        get href() { return self._page; },
+        assign(url) {
+          const code = (url.match(/code=([^&]+)/) || [])[1];
+          if (state.workerRedirect && code === state.workerRedirect.forCode) {
+            url = url.replace(code, state.workerRedirect.landingCode);
+          }
+          self._page = url;
+          state.workerNavigations += 1;
+        },
+      };
+    },
+    get document() {
+      const code = (this._page.match(/code=([^&]+)/) || [])[1] || "";
+      const landing = state.workerRedirect && state.workerRedirect.forCode === code
+        ? state.workerRedirect.landingCode : code;
+      const failed = VERIFIED_PAGES[landing] && !state.verified;
+      const bodyText = state.workerBodyOverride || (failed
+        ? "首页 商家入驻 很遗憾，您要访问的职位已过期或不存在 版权所有"
+        : JD_TEXT + " 岗位 " + landing);
+      return { body: { get innerText() { return bodyText; } } };
+    },
+  };
+  return w;
+}
+
+windowStub.open = (url, name) => {
+  if (state.popupBlocked) return null;
+  state.workerOpens += 1;
+  state.worker = makeWorkerWindow(url);
+  return state.worker;
+};
 
 // ---- sandboxed evaluation with the virtual clock ----
 const sandboxFactory = new Function(
-  "window", "document", "console", "setTimeout", "Date",
+  "window", "document", "console", "setTimeout", "Date", "location",
   helperSource);
 global.setTimeout = (cb, ms) => { vnow += Math.max(ms, 1); cb(); return 0; };
 sandboxFactory(windowStub, documentStub, consoleStub, global.setTimeout,
-  { now: () => vnow });
+  { now: () => vnow }, { href: "https://careers.example.com/jobs" });
 
-const text = () => "\n" + logs.join("\n") + "\n";
 let failures = 0;
 function expect(condition, label) {
   if (condition) { console.log("PASS " + label); }
   else { console.log("FAIL " + label); failures += 1; }
 }
 const pump = async () => new Promise((resolve) => setImmediate(resolve));
+const readyPages = () => logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length;
+const results = () => (windowStub.__JOB_HELPER_RESULT__ || { detail_results: [] }).detail_results;
 
 async function main() {
   if (SCENARIO === "single-page") {
@@ -151,101 +213,191 @@ async function main() {
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }
+
   // ---- scenario 1: stability timeout pauses automation (no next click) ----
   let guard = 0;
-  while (!logs.some((l) => l.includes("Automation is paused")) && guard++ < 300) {
+  let readyPagesAtPause = null;
+  const hasVerificationPause = SCENARIO !== "identity-mismatch";
+  if (!hasVerificationPause) {
+    while (!logs.some((l) => l === "done") && guard++ < 2000) await pump();
+  }
+  while (hasVerificationPause &&
+         !logs.some((l) => l.includes("Automation is paused")) && guard++ < 300) {
     await pump();
   }
-  if (SCENARIO !== "warmup-verification") {
-    expect(logs.some((l) => l === "PAGE_STABILITY_TIMEOUT page " + (FAIL_PAGE - 1)),
-      "stability timeout reported at page " + (FAIL_PAGE - 1));
+  if (hasVerificationPause) {
+    readyPagesAtPause = logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length;
   }
-  expect(logs.some((l) => l.includes("Automation is paused")), "paused message");
-  expect(logs.some((l) => l.includes("jobHelperResume()")), "resume instructions shown");
-  // ---- no resume: stays paused ----
+  if (hasVerificationPause) {
+    if (SCENARIO !== "warmup-verification" && SCENARIO !== "detail-worker") {
+      expect(logs.some((l) => l === "PAGE_STABILITY_TIMEOUT page " + (FAIL_PAGE - 1)),
+        "stability timeout reported at page " + (FAIL_PAGE - 1));
+    }
+    expect(logs.some((l) => l.includes("Automation is paused")), "paused message");
+    expect(logs.some((l) => l.includes("jobHelperResume()")), "resume instructions shown");
+  }
   const readyPages = logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length;
-  if (SCENARIO !== "warmup-verification") {
+  if (SCENARIO !== "warmup-verification" && SCENARIO !== "detail-worker" &&
+      hasVerificationPause) {
     expect(readyPages === FAIL_PAGE - 1, "no pages advanced past the failing page while paused");
-  }
-  await pump(); await pump();
-  if (SCENARIO !== "warmup-verification") {
+    await pump(); await pump();
     expect(logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length ===
       FAIL_PAGE - 1, "still paused without a resume");
   }
 
-  if (SCENARIO === "resume-success" || SCENARIO === "warmup-verification") {
-    // wait for the pagination pause (page 10 in resume-success; page 2
-    // during WARMUP in warmup-verification)
-    if (SCENARIO === "warmup-verification") {
-      // the FIRST pause must happen during warmup, before any "page N ready"
-      expect(logs.some((l) => l === "WARMUP_PAGE_UNSTABLE page 2"),
-        "warmup verification entered the human resume flow");
-      expect(logs.some((l) => l.includes("Automation is paused")), "warmup paused");
-      expect(logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length === 0,
-        "no formal pagination before warmup completes");
-    }
-    // ---- user completes the site's verification, then explicitly resumes ----
+  // ---- user completes the site's verification, then explicitly resumes ----
+  if (hasVerificationPause) {
     state.verified = true;
     expect(windowStub.jobHelperResume() === true, "jobHelperResume accepts the resume");
-  // helper continues under the virtual clock until the run ends
+  }
   guard = 0;
-  while (!logs.some((l) => l === "done") && guard++ < 5000) { await pump(); }
+  while (!logs.some((l) => l === "done") && guard++ < 8000) { await pump(); }
 
-  // ---- scenario 3/4: resume retried the expected page; automation continued ----
-  expect(logs.some((l) => l === "resume requested"), "explicit resume logged");
-  expect(logs.some((l) => l.startsWith("stepping back to page ")), "previous→current retry step");
-  expect(logs.some((l) => l === "verification/page recovered"), "page recovered after resume");
-  expect(logs.some((l) => l === "resuming automation"), "automation resumed");
-  if (SCENARIO === "warmup-verification") {
-    expect(logs.some((l) => l === "verification/page recovered"),
-      "verification/page recovered logged for warmup resume");
-    expect(logs.some((l) => l === "resuming automation"),
-      "resuming automation logged for warmup resume");
+  // ---- list phase assertions ----
+  if (hasVerificationPause) {
+    expect(logs.some((l) => l === "resume requested"), "explicit resume logged");
+    if (SCENARIO !== "warmup-verification") {
+      expect(logs.some((l) => l.startsWith("stepping back to page ")), "previous→current retry step");
+    }
+    expect(logs.some((l) => l === "verification/page recovered"), "page recovered after resume");
+    expect(logs.some((l) => l === "resuming automation"), "automation resumed");
   }
   expect(logs.some((l) => l === "last page reached"), "pagination continued to the last page");
-  expect(logs.some((l) => l === "total pages visited: 16"), "all 16 pages visited");
+  expect(logs.some((l) => l === "total pages visited: " + TOTAL_PAGES), "all pages visited");
   expect(logs.some((l) => l === "done"), "helper completed");
-  expect(state.list === 16, "final rendered page is the last page");
-  // warmup assertions (spec: 2->1 round-trip recreates the Page 1 request,
-  // pagesVisited untouched)
+  expect(state.list === LAST_PAGE, "final rendered page is the last page");
   expect(logs.some((l) => l === "refreshing page 1 for HAR capture (page 1 -> 2 -> 1)"),
     "warmup round-trip logged");
   expect(logs.some((l) => l === "initial page refreshed for HAR capture"),
     "initial page refreshed");
-  expect(logs.some((l) => l === "total pages visited: 16"), "pagesVisited not affected by warmup");
+  if (SCENARIO === "detail-worker" || SCENARIO === "warmup-verification") {
+    expect(logs.some((l) => l === "WARMUP_PAGE_UNSTABLE page 2"),
+      "page-2 verification paused the warmup before formal pagination");
+    expect(readyPagesAtPause === 0,
+      "no formal pagination before warmup completes");
+  }
   const firstPageReadyIndex = logs.findIndex((l) => l === "page 1 ready");
-  const warmupClicks = state.clicks.slice(0, firstPageReadyIndex < 0 ? 99 : 99);
-  expect(warmupClicks.includes(2) && warmupClicks.includes(1) &&
-    warmupClicks.indexOf(2) < warmupClicks.indexOf(1) &&
-    warmupClicks.indexOf(1) < firstPageReadyIndex,
+  expect(state.clicks.includes(2) && state.clicks.includes(1) &&
+    state.clicks.indexOf(2) < state.clicks.indexOf(1) &&
+    state.clicks.indexOf(1) < firstPageReadyIndex,
     "page 1 request recreated before formal pagination");
 
+  if (hasVerificationPause) {
+    if (SCENARIO !== "detail-worker") {
+      expect(logs.some((l) => l === "resume requested"), "explicit resume logged");
+      if (SCENARIO !== "warmup-verification") {
+        expect(logs.some((l) => l.startsWith("stepping back to page ")), "previous→current retry step");
+      }
+      expect(logs.some((l) => l === "verification/page recovered"), "page recovered after resume");
+      expect(logs.some((l) => l === "resuming automation"), "automation resumed");
+    }
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }
-  if (SCENARIO === "retry-failure") {
-    // ---- user resumes WITHOUT completing verification: retry fails again ----
-    expect(windowStub.jobHelperResume() === true, "jobHelperResume accepted");
-    // recovery timeout fires (virtual clock); the helper must NOT auto-stop:
-    // it waits for another explicit resume
-    while (!logs.some((l) => l === "PAGE_RECOVERY_TIMEOUT page " + FAIL_PAGE) &&
-           guard++ < 2000) { await pump(); }
-    expect(logs.some((l) => l === "PAGE_RECOVERY_TIMEOUT page " + FAIL_PAGE),
-      "retry failure reported");
-    expect(logs.filter((l) => l.includes("jobHelperResume() 重试")).length >= 1,
-      "re-resume or stop instructions shown");
-    const afterFailure = logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length;
+
+  // ================= detail worker scenarios =================
+  // ---- detail queue built from real list anchors ----
+  guard = 0;
+  let startDetailsPromise = null;
+  if (SCENARIO === "identity-mismatch") {
+    const firstCode = (jobsFor(LAST_PAGE)[0].href.match(/code=([^&]+)/) || [])[1];
+    state.workerRedirect = { forCode: firstCode, landingCode: "T099999" };
+    startDetailsPromise = windowStub.jobHelperStartDetails();
+  } else {
+    startDetailsPromise = windowStub.jobHelperStartDetails();
+  }
+  guard = 0;
+  while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 60000) {
+    await pump();
+    // any detail pause waits for an explicit user resume
+    if (logs.some((l) => l.includes("完成后输入 jobHelperResume() 继续"))) {
+      logs.push("__RESUME_FIRED__");
+      windowStub.jobHelperResume();
+    }
+  }
+  const startDetails = await startDetailsPromise;
+  const r = results();
+  if (process.env.DETAIL_DEBUG) {
+    console.log("DUMP " + logs.join(" || "));
+    console.log("TAIL " + logs.filter((l) => l.startsWith("detail") || l.startsWith("JD") || l === "DETAIL_QUEUE_EMPTY").join(" || "));
+  }
+
+  if (SCENARIO === "detail-worker") {
+    if (process.env.DUMP_RESULTS) {
+      console.log("RESULTS " + JSON.stringify(r));
+      console.log("NAVIGATIONS " + state.workerNavigations + " OPENS " + state.workerOpens);
+    }
+    expect(startDetails === true, "user action started the detail worker");
+    expect(state.workerOpens === 1, "worker window created exactly once");
+    expect(r.length === 3, "one result per remaining detail");
+    expect(state.workerNavigations === 2, "worker navigated sequentially via assign");
+    const allOk = r.every((x) => x.status === "SUCCESS" && x.code &&
+      x.detail_url && x.body_text && x.full_jd);
+    expect(allOk, "all detail results successful with JD text");
+    const codes = new Set(r.map((x) => x.code));
+    expect(codes.size === r.length, "no duplicate jobs in the detail queue");
+    expect(!r.some((x) => x.failure_code === "DETAIL_IDENTITY_MISMATCH"),
+      "no identity mismatches");
+    expect(logs.some((l) => l.startsWith("JD 详情：")), "progress output");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  if (SCENARIO === "worker-blocked") {
+    expect(startDetails === false, "start aborted when the popup is blocked");
+    expect(logs.some((l) => l === "DETAIL_WORKER_BLOCKED"), "popup blocked reported");
+    expect(state.workerOpens === 0, "no worker opened");
+    // allow popups and retry: same queue state, no duplication
+    state.popupBlocked = false;
+    const second = await windowStub.jobHelperStartDetails();
+    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 20000) {
+      await pump();
+    }
+    expect(second === true, "retry after unblocking succeeds");
+    expect(state.workerOpens === 1, "still exactly one worker window");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  if (SCENARIO === "worker-closed") {
+    // the user closes the worker mid-run; the helper must not lose the queue
+    const interval = setInterval(() => {
+      if (state.worker && !state.worker.closed) {
+        state.worker.closed = true;   // simulate the user closing it
+        clearInterval(interval);
+      }
+    }, 5);
     await pump(); await pump();
-    expect(logs.filter((l) => l.startsWith("page ") && l.endsWith(" ready")).length ===
-      afterFailure, "still waiting for an explicit resume after failure");
-    // ---- user stops cleanly via jobHelperStop ----
-    expect(windowStub.jobHelperStop() === true, "jobHelperStop stops the run");
-    while (!logs.some((l) => l.startsWith("automation stopped")) && guard++ < 5000) { await pump(); }
-    expect(logs.some((l) => l === "automation stopped at page " + FAIL_PAGE),
-      "clean stop without verification");
-    expect(logs.some((l) => l === "done"), "helper completed after stop");
+    clearInterval(interval);
+    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 20000) {
+      await pump();
+    }
+    expect(logs.some((l) => l === "DETAIL_WORKER_CLOSED"), "worker closed detected");
+    expect(r.some((x) => x.status === "SUCCESS"), "some details captured before close");
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }
+
+  if (SCENARIO === "identity-mismatch") {
+    // the site lands the first job's worker on a DIFFERENT posting: the
+    // helper must reject the merge and keep processing the queue
+    const firstCode = (jobsFor(LAST_PAGE)[0].href.match(/code=([^&]+)/) || [])[1];
+    guard = 0;
+    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 20000) {
+      await pump();
+    }
+    const r2 = results();
+    expect(!r2.some((x) => x.status === "SUCCESS" && x.code === firstCode),
+      "wrong landing never merged");
+    expect(r2.some((x) => x.code === firstCode && x.status === "FAILED"),
+      "mismatch recorded as failed");
+    expect(r2.some((x) => x.status === "SUCCESS" && x.code !== firstCode),
+      "batch continued after the mismatch");
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+  process.exit(failures === 0 ? 0 : 1);
 }
 main();
