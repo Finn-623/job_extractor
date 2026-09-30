@@ -78,21 +78,27 @@
   // the page-settle signal and the accumulation collector must never query
   // the DOM with different filters — stale/hidden previous-page nodes must
   // not pollute either one.
-  // Returns the current page's UNIQUE job targets (one canonical target per
-  // stable code). Real list DOMs render multiple visible anchors per job
-  // (raw anchor count can far exceed the page size — that is normal);
-  // officialPageSize counts unique jobs, so this getter must dedupe by the
-  // parsed stable identity.
+  // Returns the current page's UNIQUE MAIN-LIST job targets. Real list DOMs
+  // render side regions (Hot Jobs / recommendations) whose anchors live in
+  // their own containers (e.g. .hot-job-items) — those are shortcuts, not
+  // the paginated list, and must never enter the list collection or the
+  // page-size validation. Main-list anchors carry the site's list card link
+  // class (real DOM evidence: a.recruit-link); side-region anchors are
+  // excluded by their container ancestry.
+  let lastMainListRawCount = 0;
   const currentVisibleDetailTargets = () => {
     const raw = [];
     document.querySelectorAll(DETAIL_LINK_SELECTOR).forEach((a) => {
       if (a.offsetParent === null && a.getClientRects().length === 0) return;
+      // exclude side-region anchors (Hot Jobs / recommendation blocks)
+      if (a.closest(".hot-job-items")) return;
       let code = null, url = a.href;
       try { code = new URL(url, location.href).searchParams.get("code"); } catch {}
       if (!code) return;
       raw.push({ code, url, anchor: a,
                  title: (a.textContent || "").trim() });
     });
+    lastMainListRawCount = raw.length;
     // canonical target per code: prefer a valid href with a title
     const byCode = new Map();
     for (const item of raw) {
@@ -101,6 +107,10 @@
       if (!existing.title && item.title) byCode.set(item.code, item);
     }
     return [...byCode.values()];
+  };
+  const currentVisibleDetailTargetsRaw = () => {
+    currentVisibleDetailTargets();
+    return lastMainListRawCount;
   };
   const visibleIds = () =>
     new Set(currentVisibleDetailTargets().map((t) => t.url));
@@ -398,8 +408,8 @@
   const collectDetailTargets = (pageNo) => {
     // only the current page's unique job targets — never stale/hidden nodes
     const targets = currentVisibleDetailTargets();
-    console.log("page " + pageNo + " raw_anchors: " +
-      document.querySelectorAll(DETAIL_LINK_SELECTOR).length);
+    const mainRaw = currentVisibleDetailTargetsRaw();
+    console.log("page " + pageNo + " raw_anchors: " + mainRaw);
     console.log("page " + pageNo + " unique_jobs: " + targets.length);
     if (officialPageSize && targets.length > officialPageSize) {
       console.log("PAGE_TARGET_COUNT_INVALID page " + pageNo + " unique_jobs " +

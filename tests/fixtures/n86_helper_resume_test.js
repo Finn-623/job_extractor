@@ -53,13 +53,14 @@ const state = {
   workerBodyOverride: null,
 };
 
-function jobLink(page, index, hidden) {
-  const code = "T" + String(page).padStart(2, "0") + String(index).padStart(3, "0");
+function jobLink(page, index, hidden, hot) {
+  const code = (hot ? "H" : "T") + String(page).padStart(2, "0") + String(index).padStart(3, "0");
   return {
     textContent: "岗位 " + code,
     href: "https://careers.example.com/jobs/detail?code=" + code + "&lang=zh",
     offsetParent: hidden ? null : {},
     getClientRects: () => (hidden ? [] : [{}]),
+    closest: (sel) => (hot && sel === ".hot-job-items" ? { hot: true } : null),
   };
 }
 
@@ -81,12 +82,25 @@ function jobsFor(page) {
   if (SCENARIO === "count-invalid") {
     for (let i = 0; i < count; i++) out.push(jobLink(page, count + i));  // visible extras
   }
+
+
   if (SCENARIO === "hidden-stale") {
     for (let i = 0; i < 7; i++) out.push(jobLink(page, count + i, true));
     for (let i = 0; i < count; i++) out.push(jobLink(Math.max(1, page - 1), i, true));
   }
   if (SCENARIO === "unique-51") {
     out.push(jobLink(page, count));       // 51st unique job
+  }
+  // Hot Jobs side region: visible anchors inside .hot-job-items containers,
+  // possibly duplicating main-list codes — must never enter list collection
+  if (SCENARIO === "hot-jobs" || SCENARIO === "hot-dup") {
+    const hotCount = SCENARIO === "hot-jobs" ? 8 : 4;
+    const hotBase = SCENARIO === "hot-dup" ? page : 900;  // hot-dup reuses main codes
+    for (let i = 0; i < hotCount; i++) {
+      const el = jobLink(hotCount > 0 && SCENARIO === "hot-dup" ? page : 900 + page, i, false);
+      el.closest = (sel) => (sel === ".hot-job-items" ? { hot: true } : null);
+      out.push(el);
+    }
   }
   return out;
 }
@@ -264,6 +278,26 @@ async function main() {
         expect(new Set(r2.map((x) => x.code)).size === r2.length,
           "accumulator adds each code exactly once");
       }
+    }
+    console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
+    process.exit(failures === 0 ? 0 : 1);
+  }
+
+  if (SCENARIO === "hot-jobs" || SCENARIO === "hot-dup") {
+    let guard = 0;
+    while (!logs.some((l) => l === "done") && guard++ < 4000) await pump();
+    if (SCENARIO === "hot-jobs") {
+      // 50 main-list jobs + 8 hot jobs: unique_jobs must be 50, not 58
+      expect(logs.some((l) => l === "page 1 unique_jobs: 50"),
+        "hot jobs excluded from the main-list count");
+      expect(logs.some((l) => l === "page 1 new_unique: +50"), "+50 accumulated");
+      expect(logs.some((l) => l === "page 1 accumulated: 50"), "accumulated 50");
+      expect(logs.some((l) => l === "page 1 raw_anchors: 50"),
+        "raw_anchors counts main-list anchors only");
+    } else {
+      // hot-dup: hot anchors duplicate main-list codes — no effect at all
+      expect(logs.some((l) => l === "page 1 unique_jobs: 50"),
+        "hot duplicates do not change the main-list count");
     }
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
