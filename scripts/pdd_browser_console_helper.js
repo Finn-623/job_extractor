@@ -352,22 +352,32 @@
   let detailWorker = null;
   let detailQueueDone = false;
 
-  const buildDetailQueue = () => {
-    const seen = new Set();
+  // Detail targets accumulated across every page the List phase settled —
+  // the queue must never be rebuilt from the final page's DOM (anchors for
+  // earlier pages are long gone once pagination ends).
+  const accumulatedDetailTargets = [];
+  const seenDetailCodes = new Set();
+  const collectDetailTargets = () => {
     for (const anchor of document.querySelectorAll(DETAIL_LINK_SELECTOR)) {
       let url = anchor.href;
       let code = null;
       try { code = new URL(url, location.href).searchParams.get("code"); } catch {}
-      if (!code || seen.has(code)) continue;
-      seen.add(code);
+      if (!code || seenDetailCodes.has(code)) continue;
+      seenDetailCodes.add(code);
       let idParam = "code";
       try {
         for (const [key, value] of new URL(url, location.href).searchParams) {
           if (value === code) { idParam = key; break; }
         }
       } catch {}
-      detailQueue.push({ code, title: (anchor.textContent || "").trim(),
-                         url, idParam, status: "PENDING" });
+      accumulatedDetailTargets.push({ code, title: (anchor.textContent || "").trim(),
+                                      url, idParam });
+    }
+    return accumulatedDetailTargets.length;
+  };
+  const buildDetailQueue = () => {
+    for (const target of accumulatedDetailTargets) {
+      detailQueue.push({ ...target, status: "PENDING" });
     }
     return detailQueue.length;
   };
@@ -595,6 +605,7 @@
     }
     pagesVisited += 1;
     console.log("page " + pageNo + " ready");
+    collectDetailTargets();
     // short initial settle so Page 1's list request reaches the Network layer
     if (pagesVisited === 1) {
       await sleep(INITIAL_SETTLE_MS);

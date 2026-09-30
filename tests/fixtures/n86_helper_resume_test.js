@@ -270,6 +270,7 @@ async function main() {
     "warmup round-trip logged");
   expect(logs.some((l) => l === "initial page refreshed for HAR capture"),
     "initial page refreshed");
+
   if (SCENARIO === "detail-worker" || SCENARIO === "warmup-verification") {
     expect(logs.some((l) => l === "WARMUP_PAGE_UNSTABLE page 2"),
       "page-2 verification paused the warmup before formal pagination");
@@ -323,17 +324,22 @@ async function main() {
   }
 
   if (SCENARIO === "ids-filter") {
-    // explicit id list restricts the run to those stable ids
-    const started = await windowStub.jobHelperStartDetails(["T16000", "T16001"]);
+    // explicit id list restricts the run to those stable ids. Pagination
+    // ended on the LAST page: the requested code lives on page 1 and is
+    // long gone from the current DOM — only the accumulated list has it.
+    const page1Code = (jobsFor(1)[0].href.match(/code=([^&]+)/) || [])[1];
+    const lastPageCode = (jobsFor(LAST_PAGE)[0].href.match(/code=([^&]+)/) || [])[1];
+    expect(page1Code !== lastPageCode, "requested code is not on the final page");
+    const started = await windowStub.jobHelperStartDetails([page1Code]);
     guard = 0;
-    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 20000) {
+    while (!logs.some((l) => l.startsWith("detail capture complete")) && guard++ < 40000) {
       await pump();
     }
     const r2 = results();
     expect(started === true, "filtered run started");
-    expect(r2.length === 2, "only the requested ids processed");
-    expect(r2.every((x) => x.status === "SUCCESS" &&
-      (x.code === "T16000" || x.code === "T16001")), "only requested codes captured");
+    expect(r2.length === 1, "only the requested id processed");
+    expect(r2.every((x) => x.status === "SUCCESS" && x.code === page1Code),
+      "page-1 code captured from the accumulated list");
     console.log(failures === 0 ? "SCENARIO_ALL_PASS" : "SCENARIO_FAILED " + failures);
     process.exit(failures === 0 ? 0 : 1);
   }
