@@ -146,10 +146,49 @@ output/
 
 ## Failed / Unknown Output
 
-- `output/_unknown/<timestamp>/` — the run could not determine a company name to name the directory
+- `output/_unknown/<timestamp>/` — the final fallback when no reliable company or brand identity can be determined for the directory name
 - `output/_failed/<company-or-_unknown>/<timestamp>/` — the run failed; it contains only `error_report.json` describing what went wrong
 
 Successful runs never write into these directories.
+
+## Company / Brand Output Naming
+
+Each run directory is normally named after the company or brand behind the
+recruitment site, for example:
+
+```
+output/深圳市睿联技术有限公司/2026-01-01_120000/
+output/Usmile/2026-01-01_120000/
+```
+
+Job Extractor tries to resolve a useful company or brand name from explicit
+recruitment data, the recruitment site's own identity, or the recruitment
+domain. In most cases this produces a usable name; `_unknown/` is only the
+last-resort fallback when nothing reliable can be determined — it should be
+the exception, not the norm.
+
+## List-only Sites
+
+Some recruitment sites allow Job Extractor to collect the complete job list,
+while their detail pages have stronger browser verification or access
+restrictions. In this case Job Extractor may finish with:
+
+- collection status: `COMPLETE`
+- JD strategy: `LIST_ONLY`
+
+This means:
+
+- the job list was collected successfully (titles, locations, categories,
+  posting dates, etc.)
+- full JD pages were not batch-collected
+- **this is not a failed collection** — the list itself is the result
+- the exported list can still be used for initial filtering or
+  AI-assisted analysis (hand it to ChatGPT and let it rank and shortlist)
+- open the official recruitment site for the full JD of the jobs you are
+  interested in
+
+Job Extractor never bypasses verification or access restrictions to obtain
+these JDs; `LIST_ONLY` is the honest record of what could be collected.
 
 ## Automatic Extraction
 
@@ -198,14 +237,16 @@ If the cURL itself is not valid, the run reports `MANUAL_CURL_INVALID`-style err
 
 ### Browser-Assisted Collection
 
-Some sites sign their pagination requests with dynamic verification values. In that case the list cURL can read the current page, but replaying the same request for the next page is rejected (`CURL_PAGINATION_NOT_REPLAYABLE`). The collection then upgrades to the browser-assisted layer:
+Some sites sign their pagination requests with dynamic verification values. In that case the list cURL can read the current page, but replaying the same request for the next page is rejected (`CURL_PAGINATION_NOT_REPLAYABLE`). The CLI then offers the browser-assisted layer:
 
-1. Open the job list page in your **normal browser** and turn on Network recording
-2. Set the page size to its maximum in the site's own UI
-3. Run the bundled **pagination helper** (a paste-able console script, available via `GET /api/collect/pagination-helper` in the dashboard bridge) — it clicks the site's own next-page control until the last page and pauses automatically if the site shows a verification challenge
+1. Enter the URL as usual; when Job Extractor determines browser assistance is needed, the CLI shows the browser-assist option
+2. Choose it and the CLI **copies the bundled pagination helper to your clipboard** and opens the job list page in your **normal browser**
+3. In the browser: turn on Network recording, paste the helper into the Console and run it — it clicks the site's own next-page control until the last page, and pauses automatically if the site shows a verification challenge
 4. **The site's verification is completed by you, manually, in your normal browser.** Job Extractor never generates anti-bot tokens, never bypasses captchas, and never touches your cookies
 5. When pagination finishes, export the Network recording as a **HAR file**
-6. Import the HAR — Job Extractor ingests it **fully offline** through the formal importer: pages where a request first failed and later succeeded use the successful response; duplicates across pages are deduplicated by stable ID
+6. Return to the CLI and select the HAR file (or start with "I already have a HAR" if you exported one earlier) — Job Extractor ingests it **fully offline** through the formal importer: pages where a request first failed and later succeeded use the successful response; duplicates across pages are deduplicated by stable ID
+
+A restricted site whose detail pages cannot be safely batch-fetched may finish as a List-only result — see [List-only Sites](#list-only-sites).
 
 The importer only accepts credible job-list responses; it never replays requests and never stores cookie/authorization/anti-bot values from the HAR.
 
@@ -223,6 +264,7 @@ You can inspect the [example output](examples/example_output/) before running th
 - **JD completeness may be partial**: when a site's detail API is protected, the full job description may be incomplete even though the job list itself is fully collected. Completeness flags in `collection.json` and `report.md` always say exactly what was captured.
 - **Browser pagination helper**: the bundled helper is validated against specific pagination DOM types (for example rocket-* style pagination components). It is not a universal auto-pager, and it never handles captchas — the site's own verification is always completed by you.
 - **Generic engine is best-effort**: unknown sites are handled by generic discovery and are not guaranteed to work for every site.
+- **List-only completions**: on strongly restricted sites the result may be `COMPLETE` + `LIST_ONLY` — a fully collected list without batch-fetched JDs (see [List-only Sites](#list-only-sites)).
 
 ## Documentation
 

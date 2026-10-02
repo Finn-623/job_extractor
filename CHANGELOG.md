@@ -7,6 +7,21 @@
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-10-02
+
+### Changed
+
+- 文档收口（docs-only patch，无业务代码变更）：
+  - 说明 List-only 行为：受限站点可能以 `COMPLETE` + `LIST_ONLY` 结束——
+    岗位列表完整采集、完整 JD 未批量获取，这不是采集失败；导出 List 仍可
+    用于初筛或交给 AI 分析。
+  - Browser Assist 说明更新为当前真实 CLI 流程（URL → CLI 显示浏览器辅助
+    选项 → 助手复制到剪贴板 → 用户在正常浏览器完成人工步骤 → 导出 HAR →
+    回到 CLI 导入），移除过时的 dashboard bridge 操作路径。
+  - 新增公司/品牌输出目录命名说明（`output/<公司或品牌>/<时间戳>/`，
+    `_unknown/` 仅为最后兜底）。
+  - 故障排查更新：LIST_ONLY 结果状态说明与 `_unknown` 语义同步。
+
 ## [2.1.0] - 2026-09-29
 
 ### Added
