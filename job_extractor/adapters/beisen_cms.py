@@ -300,7 +300,8 @@ class BeisenCMSCollector(BaseAdapter):
                     self.details_failed += 1
                     errors.append(f"DETAIL_ERROR job_id={row['position_id']} reason={exc}")
             status = "COMPLETE" if expected is not None and len(raw_rows) == expected and len(jobs) == expected and not errors else ("FAILED" if expected is None else "INCOMPLETE")
-            return CollectionResult(source_url=url, platform=self.platform_name, total_expected=expected, total_fetched=len(raw_rows),
+            from job_extractor.company_identity import resolve_collection_company
+            return CollectionResult(source_url=url, platform=self.platform_name, company=resolve_collection_company(jobs, None, url), total_expected=expected, total_fetched=len(raw_rows),
                                     total_unique=len(jobs), status=status, jobs=jobs, errors=errors,
                                     started_at=started, finished_at=datetime.now())
         finally:

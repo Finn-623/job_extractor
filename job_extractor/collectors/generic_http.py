@@ -4,6 +4,7 @@ from time import perf_counter,sleep
 from typing import Any
 from urllib.parse import urlparse
 import hashlib,json,re,httpx
+from job_extractor.company_identity import resolve_collection_company
 from job_extractor.models import CollectionResult,Job
 from job_extractor.planning.models import CollectionPlan
 from job_extractor.runtime import MetricsRecorder,evaluate_data_completeness,make_error
@@ -297,6 +298,7 @@ class GenericHttpCollector:
             duplicate_audit={"scope_progress":scope_progress,"site_completion":"SITE_COMPLETE" if status=="COMPLETE" else "SITE_INCOMPLETE",
                              "cross_scope_merged_rows":cross_scope_merged_rows},
             started_at=started,finished_at=datetime.now())
+        result.company=resolve_collection_company(result.jobs,self.plan.company,self.plan.source_url)
         if scope_results:
             metrics=result.metrics
             for name in ("list_requests","list_pages","pages_requested","pages_succeeded","raw_rows","unique_jobs","duplicate_jobs","retry_count","retry_sleep_seconds","list_request_seconds","detail_request_seconds"):
@@ -600,6 +602,7 @@ class GenericHttpCollector:
         self._sync(clock)
         result=CollectionResult(source_url=self.plan.source_url,platform="generic",company=self.plan.company,scope=self.plan.scope,total_expected=expected,
             total_fetched=len(raws),total_unique=len(unique),status=status,jobs=list(unique.values()),errors=errors,duplicate_audit=audit,started_at=started,finished_at=datetime.now())
+        result.company=resolve_collection_company(result.jobs,self.plan.company,self.plan.source_url)
         result.metrics=self.recorder.metrics;result.data_completeness=evaluate_data_completeness(result)
         if result.data_completeness.source_incomplete_jobs:
             if result.data_completeness.missing_jd_jobs:

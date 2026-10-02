@@ -92,7 +92,9 @@ def test_har_source_partial_jd_keeps_list_and_export(tmp_path):
     outcome = import_har(_har_file(tmp_path, with_jd=False))
     result = outcome.result
     assert result.jobs and result.jobs[0].full_jd is None
-    assert result.metrics.jd_strategy == "UNKNOWN"
+    # N9 Final: a HAR import without any list JD is the explicit Browser
+    # Assist path — a legal List-only completion, no longer "UNKNOWN".
+    assert result.metrics.jd_strategy == "LIST_ONLY"
     assert result.data_completeness.missing_jd_jobs == 1
     assert result.data_completeness.total_jobs == 1
     assert result.status == "COMPLETE"  # list success is never discarded

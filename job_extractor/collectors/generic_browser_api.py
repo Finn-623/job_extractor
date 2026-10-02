@@ -10,6 +10,7 @@ from job_extractor.collectors.generic_detail import extract_path
 from job_extractor.discovery.network_analyzer import safe_url
 from job_extractor.discovery.dynamic import wait_for_hydration,wait_for_readiness_consensus
 from job_extractor.discovery.sources import trigger_job_page_search
+from job_extractor.company_identity import resolve_collection_company
 from job_extractor.models import CollectionResult
 from job_extractor.planning.models import CollectionPlan
 
@@ -117,7 +118,7 @@ class GenericBrowserApiCollector:
                         payload=info.value.json();runtime.page.wait_for_timeout(300);self._bind_visible_links(runtime.page,payload);batch=extract_path(payload,self.plan.list_path);payloads.append(payload);observed+=len(batch) if isinstance(batch,list) else 0
                     except Exception:capture_error="PAGINATION_RESPONSE_NOT_OBSERVED";break
         except Exception as exc:
-            return CollectionResult(source_url=self.plan.source_url,platform="generic",company=self.plan.company,scope=self.plan.scope,status="FAILED",errors=[f"BROWSER_API_CAPTURE_FAILED reason={type(exc).__name__}"],started_at=started,finished_at=datetime.now())
+            return CollectionResult(source_url=self.plan.source_url,platform="generic",company=resolve_collection_company(None,self.plan.company,self.plan.source_url),scope=self.plan.scope,status="FAILED",errors=[f"BROWSER_API_CAPTURE_FAILED reason={type(exc).__name__}"],started_at=started,finished_at=datetime.now())
         replay_plan=self.plan.model_copy(update={"mode":"HTTP_API","browser_trigger":None,"query_values":{}})
         result=GenericHttpCollector(replay_plan,client=_SequenceClient(payloads)).collect()
         result.metrics.browser_pages_opened=1;result.metrics.browser_requests_observed=len(payloads);result.metrics.elapsed_seconds=perf_counter()-clock
@@ -126,7 +127,7 @@ class GenericBrowserApiCollector:
             result.errors.append(f"{capture_error} reason=official pagination could not be completed");result.status="INCOMPLETE"
         return result
     def _native_capture_failure(self,reason,start,elapsed):
-        result=CollectionResult(source_url=self.plan.source_url,platform="generic",company=self.plan.company,scope=self.plan.scope,status="FAILED",errors=[reason],started_at=start,finished_at=datetime.now())
+        result=CollectionResult(source_url=self.plan.source_url,platform="generic",company=resolve_collection_company(None,self.plan.company,self.plan.source_url),scope=self.plan.scope,status="FAILED",errors=[reason],started_at=start,finished_at=datetime.now())
         result.metrics.collection_mode="NATIVE_BROWSER_LIST";result.metrics.elapsed_seconds=elapsed
         return result
     def _can_scroll_for_more(self,page)->bool:

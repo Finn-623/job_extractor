@@ -463,14 +463,22 @@ class ProgressReporter:
         self._emit(f"唯一岗位：{total}")
         self._emit(f"单范围重复：{dupes}")
         self._emit(f"跨范围合并：{cross_scope_merged}")
-        self._emit(f"JD 完整：{m.details_succeeded if m.details_succeeded else total}")
+        list_only = audit.get("detail_method") == "LIST_ONLY" if (audit := getattr(result, "enrichment", {}).get("detail_resolution") or {}) else False
+        if not list_only:
+            list_only = m.jd_strategy == "LIST_ONLY"
+        if list_only:
+            # N9 Final: a List-only run must never report JD complete = 岗位总数.
+            self._emit("JD 完整：未批量获取")
+        else:
+            self._emit(f"JD 完整：{m.details_succeeded if m.details_succeeded else total}")
         self._emit(f"JD 失败：{m.details_failed or 0}")
-        audit = getattr(result, "enrichment", {}).get("detail_resolution") or {}
         if audit.get("detail_method") == "AUTO_API":
             self._emit("详情方式：Direct API")
-        if audit.get("detail_method") == "LIST_ONLY" or m.jd_strategy == "LIST_ONLY":
-            self._emit(f"List-only：{audit.get('jd_missing', total)}")
-            self._emit("部分岗位未获取完整 JD，已保存岗位列表")
+        if list_only:
+            missing = audit.get("jd_missing", total)
+            self._emit(f"List-only：岗位列表 {total}（列表完整）· JD 未批量获取 {missing}")
+            self._emit("原因：网站访问限制，详情页无法安全批量抓取")
+            self._emit("岗位列表可交给 ChatGPT/AI 初筛；感兴趣岗位再到官网查看 JD")
         if getattr(result, "enrichment", {}).get("fallback", {}).get("fallback_method") == "curl":
             self._emit("数据获取方式：cURL 兜底")
         self._emit("")

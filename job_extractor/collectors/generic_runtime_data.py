@@ -31,6 +31,7 @@ from job_extractor.discovery.runtime_data import (
     merge_runtime_batches,
     run_runtime_pagination,
 )
+from job_extractor.company_identity import resolve_collection_company
 from job_extractor.models import CollectionMetrics, CollectionResult
 from job_extractor.planning.models import CollectionPlan
 from job_extractor.runtime import evaluate_data_completeness, make_error
@@ -322,7 +323,7 @@ class GenericRuntimeDataCollector:
     def _finish(self, source: RuntimeJobSource, records: list[dict], audit: dict | None, started, clock) -> CollectionResult:
         errors: list[str] = []
         if not records:
-            return CollectionResult(source_url=self.plan.source_url, platform="generic", company=self.plan.company, scope=self.plan.scope, status="FAILED", errors=["ENCRYPTED_RUNTIME_UNRESOLVED: no plaintext runtime records observed"], started_at=started, finished_at=datetime.now(), metrics=CollectionMetrics(elapsed_seconds=perf_counter() - clock, jd_strategy="DETAIL_REQUIRED", browser_pages_opened=1))
+            return CollectionResult(source_url=self.plan.source_url, platform="generic", company=resolve_collection_company(None, self.plan.company, self.plan.source_url), scope=self.plan.scope, status="FAILED", errors=["ENCRYPTED_RUNTIME_UNRESOLVED: no plaintext runtime records observed"], started_at=started, finished_at=datetime.now(), metrics=CollectionMetrics(elapsed_seconds=perf_counter() - clock, jd_strategy="DETAIL_REQUIRED", browser_pages_opened=1))
         derived = self.plan.model_copy(update={"mode": "HTTP_API", "list_method": "GET", "list_path": "$", "job_id_field": source.job_id_field or self.plan.job_id_field, "job_title_field": source.job_title_field or self.plan.job_title_field})
         inner = GenericHttpCollector(derived)
         jobs: dict[str, object] = {}
@@ -382,6 +383,7 @@ class GenericRuntimeDataCollector:
             avg_latency = 0.0
         metrics = CollectionMetrics(list_requests=max(1, audit.get("pages_requested", 0)) if audit else 1, list_pages=max(1, audit.get("pages_requested", 0)) if audit else 1, pages_requested=audit.get("pages_requested", 0) if audit else 0, pages_succeeded=audit.get("pages_succeeded", 0) if audit else 0, raw_rows=len(records), unique_jobs=len(jobs), duplicate_jobs=max(0, len(records)-len(jobs)), termination_reason=audit.get("termination_reason") if audit else None, details_attempted=attempted, details_required=required, details_succeeded=succeeded, details_failed=failed, detail_request_seconds=sum(detail_stats.get("latencies") or []) if detail_stats else 0.0, average_detail_request_seconds=avg_latency, jd_strategy="MIXED" if enrichment else "DETAIL_REQUIRED", browser_pages_opened=1, browser_requests_observed=max(1, audit.get("pages_requested", 0)) if audit else 1, elapsed_seconds=perf_counter() - clock)
         result = CollectionResult(source_url=self.plan.source_url, platform="generic", company=self.plan.company, scope=self.plan.scope, total_expected=expected, total_fetched=len(records), total_unique=len(jobs), status=status, jobs=list(jobs.values()), errors=errors, started_at=started, finished_at=datetime.now(), metrics=metrics, enrichment=enrichment)
+        result.company = resolve_collection_company(result.jobs, self.plan.company, self.plan.source_url)
         if audit:
             result.duplicate_audit = audit
         result.data_completeness = evaluate_data_completeness(result)
@@ -440,7 +442,7 @@ class GenericRuntimeDataCollector:
         if source.pagination_validated:
             batches = self.batches if self.batches is not None else self._run_pagination(source)
             if not batches:
-                return CollectionResult(source_url=self.plan.source_url, platform="generic", company=self.plan.company, scope=self.plan.scope, status="FAILED", errors=["ENCRYPTED_RUNTIME_UNRESOLVED: paginated runtime batches not observed"], started_at=started, finished_at=datetime.now(), metrics=CollectionMetrics(elapsed_seconds=perf_counter() - clock, jd_strategy="DETAIL_REQUIRED", browser_pages_opened=1))
+                return CollectionResult(source_url=self.plan.source_url, platform="generic", company=resolve_collection_company(None, self.plan.company, self.plan.source_url), scope=self.plan.scope, status="FAILED", errors=["ENCRYPTED_RUNTIME_UNRESOLVED: paginated runtime batches not observed"], started_at=started, finished_at=datetime.now(), metrics=CollectionMetrics(elapsed_seconds=perf_counter() - clock, jd_strategy="DETAIL_REQUIRED", browser_pages_opened=1))
             records, audit = merge_runtime_batches(source, batches)
             return self._finish(source, records, audit, started, clock)
         if self.observer is not None:
@@ -448,7 +450,7 @@ class GenericRuntimeDataCollector:
             return self._finish(source, list(observed.records), None, started, clock)
         records, problem = self._read_confirmed_path(source)
         if problem:
-            return CollectionResult(source_url=self.plan.source_url, platform="generic", company=self.plan.company, scope=self.plan.scope, status="FAILED", errors=[f"RUNTIME_PATH_FAIL_CLOSED: {problem}"], started_at=started, finished_at=datetime.now(), metrics=CollectionMetrics(elapsed_seconds=perf_counter() - clock, jd_strategy="DETAIL_REQUIRED", browser_pages_opened=1))
+            return CollectionResult(source_url=self.plan.source_url, platform="generic", company=resolve_collection_company(None, self.plan.company, self.plan.source_url), scope=self.plan.scope, status="FAILED", errors=[f"RUNTIME_PATH_FAIL_CLOSED: {problem}"], started_at=started, finished_at=datetime.now(), metrics=CollectionMetrics(elapsed_seconds=perf_counter() - clock, jd_strategy="DETAIL_REQUIRED", browser_pages_opened=1))
         if records is None:
             # No confirmed path on the plan: defensive legacy full-window scan.
             observed = build_runtime_source_candidate(self.plan.source_url, provider=source.provider, capability=source.capability, expected_total=source.total, request_limit=source.limit, request_offset=source.initial_offset, browser_factory=self.browser_factory)

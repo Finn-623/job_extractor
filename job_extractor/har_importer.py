@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
+from job_extractor.company_identity import resolve_collection_company
 from job_extractor.discovery.network_analyzer import get_path
 from job_extractor.discovery.scorer import confidence, score_list
 from job_extractor.field_semantics import canonical, canonical_jd, pick_jd_fields
@@ -285,13 +286,22 @@ def import_har(path: str | Path, *, source_url: str | None = None,
         "duplicate_jobs": max(0, raw_rows - len(seen)),
     }
     total = sorted(totals)[0] if len(totals) == 1 else None
+    # N9.10 site-level company identity via the shared resolver: job-level
+    # explicit company > trusted alias registry / generic domain brand
+    # inference > None. No per-site branch here; Job.company is untouched.
+    site_url = source_url or next((c.url for c in best.values()), "")
+    company = resolve_collection_company(jobs, None, site_url)
     jd_complete = sum(1 for job in jobs if job.full_jd)
     if jobs and jd_complete == len(jobs):
         jd_strategy = "LIST_SUFFICIENT"
     elif jd_complete:
         jd_strategy = "MIXED"
     else:
-        jd_strategy = "UNKNOWN"
+        # N9 Final: HAR import is the explicit Browser Assist / anti-bot path
+        # by construction (cURL pagination was rejected, so the list was
+        # collected in a real browser and exported as HAR). A list record set
+        # with no JD at all is a legal List-only completion, not an unknown.
+        jd_strategy = "LIST_ONLY"
     collection_metrics = CollectionMetrics(
         pages_requested=len(best), pages_succeeded=metrics_dict["pages_observed"],
         raw_rows=raw_rows, unique_jobs=len(seen),
@@ -304,6 +314,7 @@ def import_har(path: str | Path, *, source_url: str | None = None,
     result = CollectionResult(
         source_url=source_url or next((urlsplit(c.url).netloc for c in best.values()), ""),
         platform=platform,
+        company=company,
         metrics=collection_metrics,
         total_expected=total,
         total_fetched=raw_rows,

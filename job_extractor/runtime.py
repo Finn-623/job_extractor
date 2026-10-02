@@ -185,4 +185,15 @@ def render_result(result: CollectionResult, adapter_name: str, output_path: Path
     m=result.metrics
     mode="\nCollection mode: browser" if result.platform=="feishu" else ""
     dc=result.data_completeness; warning=f"\nWarnings: {'; '.join(result.warnings)}\n" if result.warnings else ""
-    return f"Detected platform: {result.platform}\nAdapter: {adapter_name}{mode}\n\nScope:\n{scope}\n\nExpected: {result.total_expected}\nFetched: {result.total_fetched}\nUnique: {result.total_unique}\nRaw rows: {m.raw_rows}\nDuplicates: {m.duplicate_jobs}\n\nPages: {m.list_pages}\nPages requested/succeeded: {m.pages_requested}/{m.pages_succeeded}\nList requests: {m.list_requests} (avg {m.average_list_request_seconds:.3f}s)\nDetail requests: {m.detail_requests} (avg {m.average_detail_request_seconds:.3f}s)\nRetries: {m.retry_count} (sleep {m.retry_sleep_seconds:.3f}s)\nCollection mode: {m.collection_mode}\nTermination: {m.termination_reason}\nJD strategy: {m.jd_strategy}\n\nElapsed: {m.elapsed_seconds:.2f}s\nCollection status: {result.status}\n\nData completeness:\n  Complete JD: {dc.complete_jobs} / {dc.total_jobs}\n  Missing JD at source: {dc.missing_jd_jobs}\n  Completeness: {dc.completeness_ratio:.1%}\n{warning}\nOutput:\n{output_path}"
+    # N9 Final: a List-only run must never render "Complete JD = 岗位总数".
+    if m.jd_strategy=="LIST_ONLY":
+        completeness=(f"Data completeness (List-only):\n"
+            f"  岗位列表：{dc.total_jobs}（列表完整）\n"
+            f"  完整 JD：未批量获取（网站访问限制，详情页无法安全批量抓取）\n"
+            f"  可将岗位列表交给 ChatGPT/AI 初筛；感兴趣岗位再到官网查看 JD")
+    else:
+        completeness=(f"Data completeness:\n"
+            f"  Complete JD: {dc.complete_jobs} / {dc.total_jobs}\n"
+            f"  Missing JD at source: {dc.missing_jd_jobs}\n"
+            f"  Completeness: {dc.completeness_ratio:.1%}")
+    return f"Detected platform: {result.platform}\nAdapter: {adapter_name}{mode}\n\nScope:\n{scope}\n\nExpected: {result.total_expected}\nFetched: {result.total_fetched}\nUnique: {result.total_unique}\nRaw rows: {m.raw_rows}\nDuplicates: {m.duplicate_jobs}\n\nPages: {m.list_pages}\nPages requested/succeeded: {m.pages_requested}/{m.pages_succeeded}\nList requests: {m.list_requests} (avg {m.average_list_request_seconds:.3f}s)\nDetail requests: {m.detail_requests} (avg {m.average_detail_request_seconds:.3f}s)\nRetries: {m.retry_count} (sleep {m.retry_sleep_seconds:.3f}s)\nCollection mode: {m.collection_mode}\nTermination: {m.termination_reason}\nJD strategy: {m.jd_strategy}\n\nElapsed: {m.elapsed_seconds:.2f}s\nCollection status: {result.status}\n\n{completeness}\n{warning}\nOutput:\n{output_path}"

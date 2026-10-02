@@ -27,7 +27,10 @@ class CollectionMetrics(BaseModel):
     total_elapsed_seconds: float = 0.0
     collection_elapsed_seconds: float = 0.0
     page_size: int | None = None
-    jd_strategy: Literal["LIST_SUFFICIENT", "DETAIL_REQUIRED", "DETAIL_FALLBACK", "MIXED", "UNKNOWN"] = "UNKNOWN"
+    # N9 Final: LIST_ONLY is a legal completion reserved for the explicit
+    # Browser Assist / HAR + anti-bot path (list fully collected, detail pages
+    # not safely batch-fetchable). Normal missing-JD runs never get it.
+    jd_strategy: Literal["LIST_SUFFICIENT", "DETAIL_REQUIRED", "DETAIL_FALLBACK", "MIXED", "UNKNOWN", "LIST_ONLY"] = "UNKNOWN"
     browser_pages_opened: int = 0
     browser_requests_observed: int = 0
     # STEP 70: browser fallback runtime accounting (opt-in browser path only).

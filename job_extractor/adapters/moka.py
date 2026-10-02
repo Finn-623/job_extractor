@@ -145,4 +145,5 @@ class MokaAdapter(BaseAdapter):
         except (httpx.HTTPError,MokaResponseError) as e: errors.append(str(e))
         unique=len(jobs); status="COMPLETE" if total is not None and fetched==total and unique==total and not errors else ("FAILED" if total is None else "INCOMPLETE")
         self.elapsed_seconds=perf_counter()-clock
-        return CollectionResult(source_url=url,platform="moka",company=self.scope.company if self.scope else None,total_expected=total,total_fetched=fetched,total_unique=unique,status=status,jobs=jobs,errors=errors,started_at=started,finished_at=datetime.now())
+        from job_extractor.company_identity import resolve_collection_company
+        return CollectionResult(source_url=url,platform="moka",company=resolve_collection_company(jobs,self.scope.company if self.scope else None,url),total_expected=total,total_fetched=fetched,total_unique=unique,status=status,jobs=jobs,errors=errors,started_at=started,finished_at=datetime.now())

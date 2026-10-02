@@ -546,10 +546,9 @@ def manual_result_to_collection_result(result:ManualCurlResult,source_url:str)->
     detail_resolution=getattr(result,"detail_resolution",None)
     list_sufficient=result.detail_strategy=="LIST_SUFFICIENT"
     list_only=result.detail_strategy=="LIST_ONLY" or bool(getattr(detail_resolution,"list_only_used",False))
-    # CollectionMetrics deliberately has a stable public vocabulary.  Keep
-    # LIST_ONLY as audit detail_method while representing it as the existing
-    # fallback strategy in that schema.
-    metric_strategy="DETAIL_FALLBACK" if list_only else result.detail_strategy
+    # N9 Final: LIST_ONLY is now a first-class jd_strategy value — the audit
+    # detail_method and the metric vocabulary no longer disagree.
+    metric_strategy="LIST_ONLY" if list_only else result.detail_strategy
     detail_failed=(getattr(detail_resolution,"jd_failed",result.failed_details) if detail_resolution is not None else result.failed_details)
     detail_succeeded=(getattr(detail_resolution,"jd_success",len(result.jobs)) if detail_resolution is not None else len(result.jobs))
     # STEP94N: real AUTO_API timing/concurrency evidence when available.
@@ -568,9 +567,12 @@ def manual_result_to_collection_result(result:ManualCurlResult,source_url:str)->
     warnings=[f"SOURCE_CROSS_PAGE_DUPLICATES raw_total={result.total} duplicate_records={duplicates}"] if duplicates else []
     if detail_resolution is not None:
         warnings.append(f"DETAIL_METHOD {detail_resolution.detail_method}")
-    from job_extractor.job_normalize import unified_company
-    unified=unified_company(result.jobs)
-    return CollectionResult(source_url=source_url,platform="manual_curl",company=unified,metrics=metrics,
+    # N9.10: shared resolver — explicit job-level company first, then generic
+    # domain brand inference on the source/API host; ATS platforms can never
+    # leak through as the company.
+    from job_extractor.company_identity import resolve_collection_company
+    company = resolve_collection_company(result.jobs, None, source_url)
+    return CollectionResult(source_url=source_url,platform="manual_curl",company=company,metrics=metrics,
         total_expected=result.total,total_fetched=result.list_fetched,total_unique=result.unique_jobs,
         status=status,jobs=result.jobs,warnings=warnings,
         errors=[f"DETAIL_FAILED id={job_id} reason={reason}" for job_id,reason in result.failed_detail_reasons or []],

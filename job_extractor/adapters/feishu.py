@@ -139,7 +139,8 @@ class FeishuAdapter(BaseAdapter):
         if leaks: errors.append(make_error("SCOPE_LEAK","unexpected recruitment type",count=leaks))
         self.normalize_seconds=perf_counter()-normalize_started
         status="FAILED" if expected is None else ("COMPLETE" if len(raws)==expected==len(jobs) and not errors else "INCOMPLETE")
-        return CollectionResult(source_url=url,platform="feishu",company=self.scope.company if self.scope else None,
+        from job_extractor.company_identity import resolve_collection_company
+        return CollectionResult(source_url=url,platform="feishu",company=resolve_collection_company(jobs,self.scope.company if self.scope else None,url),
             total_expected=expected,total_fetched=len(raws),total_unique=len(jobs),status=status,jobs=jobs,
             errors=errors,metrics=self.recorder.metrics,started_at=started,finished_at=datetime.now())
     def collect(self,url):

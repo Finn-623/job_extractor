@@ -10,6 +10,7 @@ import httpx
 from job_extractor.collectors.generic_detail import GenericHtmlDetailCollector
 from job_extractor.collectors.generic_http import GenericHttpCollector, ID_FIELDS, TITLE_FIELDS
 from job_extractor.discovery.dom_semantics import filter_detail_links
+from job_extractor.company_identity import resolve_collection_company
 from job_extractor.models import CollectionResult
 from job_extractor.planning.models import CollectionPlan
 from job_extractor.runtime import MetricsRecorder, evaluate_data_completeness, make_error
@@ -55,7 +56,7 @@ class GenericHtmlCollector:
                 next_pages=[urljoin(page_url,href) for href,label in all_links if "pageindex=" in href.lower() and urljoin(page_url,href) not in seen_pages]
                 if not next_pages: break
                 page_url=next_pages[0]; termination="PAGE_LIMIT" if self.page_count>=self.max_pages else "PAGINATION"
-            if not raws: return CollectionResult(source_url=self.plan.source_url,platform="generic",status="FAILED",errors=errors,started_at=started,finished_at=datetime.now())
+            if not raws: return CollectionResult(source_url=self.plan.source_url,platform="generic",company=resolve_collection_company(None,self.plan.company,self.plan.source_url),status="FAILED",errors=errors,started_at=started,finished_at=datetime.now())
             fetched_count=len(raws)
             unique_raw={raw["detailUrl"]:raw for raw in raws}; raws=list(unique_raw.values())
             ids=tuple((self.plan.detail_id_field,*ID_FIELDS)); titles=tuple((self.plan.job_title_field,*TITLE_FIELDS))
@@ -66,8 +67,9 @@ class GenericHtmlCollector:
             expected=len(raws); complete=not errors and len(jobs)==expected and termination!="PAGE_LIMIT"
             result=CollectionResult(source_url=self.plan.source_url,platform="generic",company=self.plan.company,scope=self.plan.scope,total_expected=expected,total_fetched=len(raws),total_unique=len(jobs),status="COMPLETE" if complete else "INCOMPLETE",jobs=jobs,errors=errors,started_at=started,finished_at=datetime.now())
             result.metrics=self.recorder.finish(); result.metrics.details_attempted=self.details_attempted; result.metrics.details_succeeded=self.details_succeeded; result.metrics.details_failed=self.details_failed; result.metrics.collection_mode="HTML_SSR"; result.metrics.termination_reason=termination
+            result.company=resolve_collection_company(result.jobs,self.plan.company,self.plan.source_url)
             result.duplicate_audit={"collapsed_count":fetched_count-len(raws),"unexplained_count":0}
             result.data_completeness=evaluate_data_completeness(result); return result
         except Exception as exc:
-            return CollectionResult(source_url=self.plan.source_url,platform="generic",status="FAILED",errors=[make_error("HTML_LIST_REQUEST_FAILED",type(exc).__name__)],started_at=started,finished_at=datetime.now())
+            return CollectionResult(source_url=self.plan.source_url,platform="generic",company=resolve_collection_company(None,self.plan.company,self.plan.source_url),status="FAILED",errors=[make_error("HTML_LIST_REQUEST_FAILED",type(exc).__name__)],started_at=started,finished_at=datetime.now())
         finally: self.elapsed_seconds=perf_counter()-clock

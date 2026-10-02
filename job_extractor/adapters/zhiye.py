@@ -304,8 +304,9 @@ class ZhiyeAdapter(BaseAdapter):
             try:
                 first_jobs, expected = self._negotiate_page_size(base_url, self.scope)
             except (ZhiyeResponseError, ValueError) as exc:
+                from job_extractor.company_identity import resolve_collection_company
                 return CollectionResult(
-                    source_url=url, platform=self.platform_name, company=tenant.company,
+                    source_url=url, platform=self.platform_name, company=resolve_collection_company(None, tenant.company, url),
                     total_fetched=0, total_unique=0, status="FAILED",
                     errors=[f"LIST_PAGE_ERROR page=0 reason={exc}"],
                     started_at=started_at, finished_at=datetime.now(),
@@ -396,8 +397,9 @@ class ZhiyeAdapter(BaseAdapter):
                 or (expected is not None and len(jobs) < expected)
                 or any(error.startswith("LIST_PAGE_ERROR") for error in errors)
             )
+            from job_extractor.company_identity import resolve_collection_company
             return CollectionResult(
-                source_url=url, platform=self.platform_name, company=resolved_company,
+                source_url=url, platform=self.platform_name, company=resolve_collection_company(jobs, resolved_company, url),
                 total_expected=expected, total_fetched=len(raw_jobs), total_unique=len(jobs),
                 status="INCOMPLETE" if incomplete else "COMPLETE", jobs=jobs,
                 errors=errors, started_at=started_at, finished_at=datetime.now(),

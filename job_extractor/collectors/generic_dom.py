@@ -4,6 +4,7 @@ from time import perf_counter
 from urllib.parse import urlsplit
 import hashlib
 from job_extractor.browser import BrowserRuntime
+from job_extractor.company_identity import resolve_collection_company
 from job_extractor.models import CollectionResult,CollectionMetrics,Job
 from job_extractor.planning.models import CollectionPlan
 from job_extractor.runtime import evaluate_data_completeness,make_error
@@ -92,6 +93,7 @@ class GenericDomCollector:
             total_fetched=len(jobs),total_unique=len(unique),status=status,jobs=list(unique.values()),errors=errors,duplicate_audit={"duplicate_key_type":"identity_v2","groups":duplicate_groups,"collapsed_count":len(jobs)-len(unique),"unexplained_count":unexplained},started_at=started,finished_at=datetime.now(),
             metrics=CollectionMetrics(detail_requests=details,details_attempted=details,details_succeeded=successes,details_failed=failures,
                 elapsed_seconds=perf_counter()-clock,jd_strategy="DETAIL_REQUIRED",browser_pages_opened=1))
+        result.company=resolve_collection_company(result.jobs,self.plan.company,self.plan.source_url)
         result.data_completeness=evaluate_data_completeness(result)
         if result.data_completeness.missing_requirements_jobs:
             result.warnings=[f"STRUCTURED_REQUIREMENTS_UNAVAILABLE count={result.data_completeness.missing_requirements_jobs}; full_jd preserved"]

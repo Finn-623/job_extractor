@@ -18,7 +18,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlparse
 
 if TYPE_CHECKING:
     from job_extractor.models import CollectionResult
@@ -28,10 +28,18 @@ UNKNOWN = "_unknown"
 FAILED_ROOT = "_failed"
 
 # Formal company names for well-known recruitment hosts / brand tokens.
+# N9.8: this mapping IS the trusted site-identity registry — every entry is a
+# verified site-level company observed on the official recruitment site
+# (e.g. careers.pddglobalhr.com shows "拼多多集团-PDD"; the canonical group
+# name is "拼多多集团"). Brand tokens in a host or company value map to the
+# formal name through generic lookup only — never per-site if-branches.
 KNOWN_COMPANY_NAMES = {
     "byd": "比亚迪",
     "geely": "吉利",
     "zte": "中兴",
+    "pdd": "拼多多集团",
+    # xg.pinduoduo.com — the same verified PDD group site, distinct brand token
+    "pinduoduo": "拼多多集团",
 }
 
 _UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]+')
@@ -42,6 +50,23 @@ def sanitize_folder_name(name: str) -> str:
     """Make a company name safe as a single filesystem folder name."""
     cleaned = _UNSAFE_CHARS.sub("_", name).strip(" .")
     return cleaned or UNKNOWN
+
+
+def trusted_site_company(source_url: str | None) -> str | None:
+    """Verified site-level company from the trusted registry (N9.8).
+
+    Generic lookup of verified brand tokens against the source host; accepts
+    both full URLs and bare hosts (HAR imports record the list-API origin).
+    Unlike :func:`formal_company_name` there is no ``_unknown`` fallback: a
+    domain without a verified entry stays ``None`` (fail closed). Callers must
+    apply the existing identity priority — job-level explicit company wins
+    over this site-level identity.
+    """
+    host = (urlsplit(source_url or "").hostname or source_url or "").lower()
+    for token, formal in KNOWN_COMPANY_NAMES.items():
+        if token in host:
+            return formal
+    return None
 
 
 def formal_company_name(company: str | None, source_url: str | None) -> str:

@@ -124,7 +124,11 @@ def _run_stages(url,collect_fn,adapter_name,reporter,discovery_done=False,scope_
     reporter.stage(4)
     metrics=result.metrics
     if result.status!="FAILED":
-        if metrics.jd_strategy=="LIST_SUFFICIENT" or (metrics.details_attempted==0 and metrics.details_succeeded==0):
+        if metrics.jd_strategy=="LIST_ONLY":
+            # N9 Final: List-only is a legal completion — never claim the
+            # list already contains full JDs, and never fake detail activity.
+            reporter.note(4,"List-only：岗位列表完整，JD 未批量获取（网站访问限制）")
+        elif metrics.jd_strategy=="LIST_SUFFICIENT" or (metrics.details_attempted==0 and metrics.details_succeeded==0):
             reporter.list_sufficient(result.total_unique,max(metrics.detail_request_seconds,metrics.detail_fallback_seconds))
         else:
             attempted=metrics.details_succeeded+metrics.details_failed
@@ -277,6 +281,7 @@ def _run_har_fallback(url: str, reporter: ProgressReporter, har_path: str,
         return False
     unified.enrichment["fallback"]=_fallback_audit(url,auto_code,auto_stage,
         fallback_method="har_import",har_file=path.name)
+    reporter.set_company(unified.company)  # N9.8: site-level identity reaches the board too
     reporter.use_curl_fallback(); reporter.stage(2)
     metrics=outcome.metrics
     typer.echo(f"HAR 导入成功\\n已恢复：{metrics['raw_rows']} raw / "
