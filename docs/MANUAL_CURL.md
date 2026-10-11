@@ -242,7 +242,7 @@ csrf
 粘贴完 cURL 后，新起一行只写 `END` 三个字母，回车。想放弃就单独一行输入 `CANCEL`。
 
 **网站返回 401 / 403？**
-通常是会话过期或网站有访问限制。重新打开页面、重新复制 cURL 并立即使用；若仍然失败，说明该站点需要登录态才能访问，请勿尝试绕过。
+通常是会话过期或网站有访问限制。重新打开页面、重新复制 cURL 并立即使用；若仍然失败，说明该站点需要登录态才能访问，请勿尝试绕过。已有 Checkpoint 的，按第 17 节换一份**新的 Detail cURL** 续抓缺失 JD。
 
 **提示"返回的数据不是有效 JSON"？**
 你选中的请求不是岗位数据接口。回到 Network 里找 Preview 中能看到岗位列表结构的那个请求。
@@ -269,3 +269,71 @@ curl 'https://jobs.example.com/api/postings/detail?postId=10086' \
 ```
 
 > 示例中故意没有 Cookie / Token。你复制的真实 cURL 里通常会有——**对外分享前务必按第 13 节脱敏**。
+
+## 16. JD 补全状态与结果状态
+
+本工具里有**两类容易混淆的状态**，含义完全不同：
+
+**Checkpoint 阶段标记**（保存在 checkpoint 文件的 `stage` 字段，只属于 Manual cURL 路径）：
+
+| 标记 | 含义 |
+|------|------|
+| `JD_COMPLETE` | JD 阶段全部任务补全成功 |
+| `JD_PARTIAL` | JD 阶段**部分任务未成功**：有的岗位补全失败（FAILED），或预算到期被跳过（SKIPPED），或等待你提供 Detail cURL 时结束 |
+| `JD_ABORTED` | JD 阶段被**中断或异常**终止（包括 Ctrl+C）——已完成的任务此时已保存，不会丢失 |
+
+Checkpoint 内每个岗位还有逐任务状态 `task_states`：`SUCCESS`（已成功）、`FAILED`（失败，可重试）、`SKIPPED`（预算到期跳过，可重试）。
+
+**正式结果状态**（`collection.json` 的 `status` 字段，所有采集路径通用）：
+
+| 状态 | 含义 | 你会得到什么 |
+|------|------|------|
+| `COMPLETE` | 正式采集结果完整 | 正常输出全部五个文件 |
+| `INCOMPLETE` | 正式采集结果**不完整**（例如列表完整但仍有 JD 未补全） | **仍会正式输出全部五个文件**，报告中如实标记缺了什么 |
+| `FAILED` | 正式采集未完成 | 仅 `output/_failed/` 下的 `error_report.json` |
+
+例如：先浏览 `INCOMPLETE` 导出的五个文件，再用第 17 节的 Checkpoint 续抓补齐；
+`JD_PARTIAL` / `JD_ABORTED` 只是 checkpoint 里的阶段标记，不是正式导出状态。
+
+## 17. Checkpoint 保存与定向续抓
+
+**保存在哪里？** 每次 Manual cURL 运行会在 JD 补全阶段自动维护一份 checkpoint：
+
+```text
+output/_checkpoints/<run-id>/jd_checkpoint.json
+```
+
+它包含该次运行的岗位列表、每个岗位的任务状态和来源 URL。三种时机都会自动保存：
+
+1. JD 阶段正常结束但有任务未成功（`JD_PARTIAL`）
+2. 等待你提供 Detail cURL 或你选择「仅保存当前岗位 List」时
+3. 运行被中断或异常终止（`JD_ABORTED`，含 Ctrl+C）
+
+> **不要把 `output/_checkpoints/` 提交到 Git。** 它位于已被 `.gitignore` 忽略的
+> `output/` 之下，属于本地运行数据。
+
+**如何从 Checkpoint 补抓缺失 JD？** 用 `--resume-checkpoint` 配合**一份新的有效
+Detail cURL**（旧 cURL 里的会话信息很可能已过期）：
+
+```bash
+python main.py --resume-checkpoint "output/_checkpoints/<run-id>/jd_checkpoint.json" --detail-curl-file "detail.txt"
+```
+
+说明：
+
+- **只补抓缺失的 JD**：仅重试 checkpoint 里失败（FAILED）、被跳过（SKIPPED）或不可信的岗位；已成功的岗位原样保留，**不会重复抓取**
+- 不需要再提供 List cURL，也不需要招聘 URL——列表和岗位数据已在 checkpoint 里
+- 恢复运行**会创建一个新的独立 Checkpoint**（内部记录它续抓自哪份旧 checkpoint）：如果这次仍有 JD 没补上，可以用新 checkpoint 再次恢复
+- 恢复完成后照常正式导出：全部补齐 → `COMPLETE`；仍有缺失 → `INCOMPLETE`（仍输出全部五个文件）
+
+**避免重复抓取已经完成的 JD？** 不需要你做任何事——续抓只看 checkpoint 的
+`task_states`，状态为 `SUCCESS` 的岗位直接沿用。反复续抓也是安全的。
+
+## 18. Cookie 失效与过期参数
+
+- 复制的 cURL 里的 Cookie / 会话信息有时效：出现 `401 / 403` 或请求被拒绝，
+  通常意味着会话过期或参数失效。**重新打开页面、重新复制一次 cURL、立即
+  使用**即可，不要用旧 cURL 反复重试。
+- 为续抓准备 Detail cURL 时同理：**提供一份当下复制的新 cURL**，而不是当初
+  失败运行时用过的那份。
+- 若站点需要登录态才能访问，请勿绕过；只采集你正常浏览器里可见的公开数据。

@@ -122,7 +122,7 @@ def test_auto_api_probe_failure_falls_back_to_rendered_page():
               "2. 跟进新产品导入试产，输出工艺文件与验证报告；\n"
               "任职要求\n1. 本科及以上学历，电子、机械相关专业；\n2. 三年以上 SMT 工艺经验。")
     class FakePage:
-        def goto(self, url, wait_until=None): visited.append(url)
+        def goto(self, url, wait_until=None, timeout=None): visited.append(url)
         def evaluate(self, *_a, **_k): return RENDER
         def close(self): pass
     with _client(rows=2, detail_status=404) as client:
@@ -142,7 +142,7 @@ def test_auto_api_http_500_probe_failure_falls_back_to_rendered_page():
               "2. 跟进新产品导入试产，输出工艺文件与验证报告；\n"
               "任职要求\n1. 本科及以上学历，电子、机械相关专业；\n2. 三年以上 SMT 工艺经验。")
     class FakePage:
-        def goto(self, url, wait_until=None): pass
+        def goto(self, url, wait_until=None, timeout=None): pass
         def evaluate(self, *_a, **_k): return RENDER
         def close(self): pass
     with _client(rows=1, detail_status=500) as client:
@@ -159,7 +159,7 @@ def test_auto_api_partial_failure_isolated_and_rendered_fills_rest():
               "2. 跟进新产品导入试产，输出工艺文件与验证报告；\n"
               "任职要求\n1. 本科及以上学历，电子、机械相关专业；\n2. 三年以上 SMT 工艺经验。")
     class FakePage:
-        def goto(self, url, wait_until=None): visited.append(url)
+        def goto(self, url, wait_until=None, timeout=None): visited.append(url)
         def evaluate(self, *_a, **_k): return RENDER
         def close(self): pass
     with _client(rows=3, fail_ids={"p2"}) as client:

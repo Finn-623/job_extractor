@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from job_extractor.models import CollectionResult, Job
+from job_extractor.models import CollectionMetrics, CollectionResult, Job
 from job_extractor.output_layout import (FAILED_ROOT, UNKNOWN, format_stamp,
     formal_company_name, resolve_run_directory, unique_run_dir)
 from job_extractor.reporting import ReportManager
@@ -179,8 +179,44 @@ def test_output_ignored_by_git():
         assert git("check-ignore", "--quiet", path).returncode != 0, path
 
 
-def test_cli_routes_through_formal_layout(tmp_path):
-    """Live small-sample run (Zhiye adapter) — asserts the formal run folder and files."""
+def test_cli_routes_through_formal_layout(tmp_path, monkeypatch):
+    """Offline: CLI -> formal run folder and files (Zhiye adapter stubbed, no network)."""
+    import job_extractor.cli as cli
+    monkeypatch.setattr("job_extractor.adapters.beisen_cms.BeisenCMSCollector.probe",
+                        classmethod(lambda cls, url: False))
+
+    def fake_collect(self, url):
+        # runtime.collect_url -> finalize_result rebuilds metrics from adapter
+        # attrs; keep them consistent with a real COMPLETE (same as test_cli.py).
+        self.list_requests = 1
+        self.details_attempted = 0
+        self.details_succeeded = 0
+        self.details_failed = 0
+        self.detail_strategy = "LIST_SUFFICIENT"
+        self.elapsed_seconds = 1.0
+        m = CollectionMetrics(jd_strategy="LIST_SUFFICIENT", list_requests=1, raw_rows=1,
+                              details_succeeded=0, details_failed=0, elapsed_seconds=1.0)
+        return CollectionResult(source_url=url, platform="zhiye", company="零跑汽车",
+                                status="COMPLETE", total_expected=1, total_fetched=1,
+                                total_unique=1, jobs=[job()], metrics=m)
+
+    monkeypatch.setattr("job_extractor.cli.ZhiyeAdapter.collect", fake_collect)
+    monkeypatch.setattr("job_extractor.config.OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr("job_extractor.cli.OUTPUT_DIR", tmp_path)
+    result = runner.invoke(cli.app, ["https://leapmotor1.zhiye.com/campus/jobs"])
+    assert result.exit_code == 0
+    company_dir = tmp_path / "零跑汽车"
+    runs = list(company_dir.iterdir()) if company_dir.exists() else []
+    assert runs, "no run folder created"
+    run = max(runs, key=lambda p: p.name)
+    for name in ("jobs.json", "jobs.csv", "collection.json", "report.md", "jobs.xlsx"):
+        assert (run / name).exists(), name
+    assert not (run / "error_report.json").exists()
+
+
+@pytest.mark.live
+def test_live_cli_routes_through_formal_layout_leapmotor_zhiye():
+    """Live small-sample run against the real Zhiye site (opt-in: pytest -m live)."""
     import job_extractor.cli as cli
     company_dir = Path("output/零跑汽车")
     pre = {p.name for p in company_dir.iterdir()} if company_dir.exists() else set()

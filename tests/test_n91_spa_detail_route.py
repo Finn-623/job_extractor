@@ -70,7 +70,7 @@ def test_resolve_targets_classifies_pdd_records_as_rendered_page():
 
 def _fake_page(url: str, render: str):
     class FakePage:
-        def goto(self, target, wait_until=None): pass
+        def goto(self, target, wait_until=None, timeout=None): pass
         @property
         def url(self): return url
         def evaluate(self, *_a, **_k): return render

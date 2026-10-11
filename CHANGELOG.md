@@ -7,6 +7,50 @@
 
 ## [Unreleased]
 
+## [2.2.0-rc.1] - 2026-10-11
+
+首个 GitHub Pre-release（Release Candidate）。内部版本显示 `2.2.0rc1`（PEP 440
+写法），与本节标题对应的 Git Tag 写法 `v2.2.0-rc.1` 为同一版本号的两种等价拼写。
+
+### Added
+
+- JD 阶段软时间预算 `--jd-time-budget`（默认 300 秒）与预算到期策略
+  `--jd-on-timeout ask|skip`（非 TTY 默认 skip，无人值守运行会自动跳过并保存）。
+- Manual cURL Checkpoint（`output/_checkpoints/<run-id>/jd_checkpoint.json`）：
+  JD 阶段部分完成或中断时自动保存岗位列表与逐任务状态（SUCCESS / FAILED / SKIPPED）。
+- `--resume-checkpoint` 定向续抓：配合新的有效 `--detail-curl` / `--detail-curl-file`
+  仅重试 checkpoint 中缺失、失败或被跳过的 JD；已成功任务保留，恢复运行产生
+  独立的新 Checkpoint（记录 `resumed_from`）。
+- JD 部分失败后的正式导出：结果状态为 `INCOMPLETE` 时仍输出全部五个正式文件，
+  并与 Checkpoint 阶段标记 `JD_PARTIAL` / `JD_ABORTED` 明确区分。
+- 五阶段 CLI 动态进度（ProgressReporter）：首次 Detail API 探测状态、
+  基于近期吞吐率的 ETA、连续 15 秒无完成事件提示、预算到期后已启动任务
+  安全收束的状态显示。
+- 默认离线测试套件；真实站点测试改为 `pytest -m live` 显式 opt-in。
+
+### Changed
+
+- CLI 进度渲染统一为 ProgressReporter，TTY 输出自适应。
+- Detail API 生命周期处理：探测状态显式化，失败分类与收束行为更准确。
+- 完整回归默认不发起外网请求（离线 stub），live 测试独立运行。
+
+### Fixed
+
+- JD 补全失败导致无法正式导出的问题（部分失败仍正式导出）。
+- 中断（含 KeyboardInterrupt）时 task_states 丢失的问题。
+- UI 停留在过期进度的问题。
+- 初始 ETA 严重失真的问题。
+- 部分结果场景下并发指标统计不准确的问题。
+
+### Known Limitations
+
+- `--jd-time-budget` 是**软预算**：只约束 JD 补全阶段，已启动的请求会安全收束，
+  不保证整个进程严格在预算时长内退出。
+- Checkpoint 与 `--resume-checkpoint` 定向续抓目前仅在 Manual cURL 路径实现；
+  自动模式、Generic / Provider 采集器不生成 checkpoint，也不全面支持上述能力。
+- 真实外部招聘网站的完整回归（live 测试）本版本尚未重新执行通过。
+- Hotjob 自动发现仍可能失败，需要 Manual cURL 兜底。
+
 ## [2.1.1] - 2026-10-02
 
 ### Changed

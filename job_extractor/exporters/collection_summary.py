@@ -54,6 +54,9 @@ def build_collection_summary(result: "CollectionResult", collection_mode: str) -
         "errors": list(result.errors),
         "fallback": result.enrichment.get("fallback") if result.enrichment else None,
         "detail_resolution": detail_audit or None,
+        # N7A: resume activity stats (preexisting/requested/new_success/failed/
+        # skipped/still_missing); absent (None) for fresh collections.
+        "resume_stats": (result.enrichment or {}).get("resume_stats"),
     }
 
 

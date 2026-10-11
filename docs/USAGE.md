@@ -96,3 +96,49 @@ JOB_EXTRACTOR_TRACE=1 python main.py "https://example.com/jobs"
 Trace output is intended for troubleshooting and may contain request structure
 details. Review and redact it before sharing. See
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common errors and platform limits.
+
+## CLI options reference
+
+All parameters below belong to `python main.py`. Behaviour described here follows
+the actual implementation.
+
+### `--scope {campus, social, intern, all}`
+
+- **Purpose:** resolve an ambiguous recruitment scope explicitly instead of collecting all scopes.
+- **Default:** none (the engine discovers and merges all explicit scopes).
+- **Example:** `python main.py "URL" --scope campus`
+- **Support range:** Generic multi-scope sites. Dedicated adapters usually infer their scope from the URL already.
+- **Limit:** invalid values are rejected with a clear error (`campus, social, intern, or all`).
+
+### `--jd-time-budget <seconds>`
+
+- **Purpose:** soft time budget for the JD enrichment (detail-fetching) stage.
+- **Default:** `300` seconds.
+- **Example:** `python main.py "URL" --jd-time-budget 600`
+- **Support range:** the JD enrichment stage. It is most meaningful for the Manual cURL path and generic collection; dedicated adapters keep their existing per-request timeout behaviour.
+- **Limits:** this is a **soft** budget, not a hard timeout for the whole process — requests that already started finish safely, so the run may exceed 300 seconds in total. Use `0` only if you want the JD stage to skip immediately (with `--jd-on-timeout skip` semantics).
+
+### `--jd-on-timeout {ask, skip}`
+
+- **Purpose:** what happens when the budget expires — `ask` prompts you interactively; `skip` immediately stops waiting for remaining JDs and saves.
+- **Default:** none (auto-detected: TTY runs ask, non-TTY / redirected runs default to `skip`).
+- **Example:** `python main.py "URL" --jd-on-timeout skip` (unattended, always finishes)
+- **Limits:** invalid values are rejected (`must be ask or skip`).
+
+### `--detail-curl "<curl>"` / `--detail-curl-file <path>`
+
+- **Purpose:** an explicit public detail request (the per-job JD request), copied from the browser. It is parsed, never shell-executed.
+- **Default:** none — JD details are probed automatically first.
+- **Example:** `python main.py --list-curl-file list.txt --detail-curl-file detail.txt`
+- **Limits:** `--detail-curl` and `--detail-curl-file` are mutually exclusive; a cURL in `(cmd)` format is not supported (use the bash copy). Remove Cookie/Authorization headers before sharing. See [MANUAL_CURL.md](MANUAL_CURL.md).
+
+### `--resume-checkpoint <path>`
+
+- **Purpose:** resume only the missing, failed, or skipped JD jobs recorded in a Manual cURL checkpoint; previously trusted jobs are kept.
+- **Default:** none.
+- **Example:**
+  ```bash
+  python main.py --resume-checkpoint "output/_checkpoints/<run-id>/jd_checkpoint.json" --detail-curl-file "detail.txt"
+  ```
+- **Support range:** **Manual cURL checkpoints only.** The automatic / generic collectors do not create checkpoints.
+- **Limits:** requires `--detail-curl` or `--detail-curl-file` (a fresh, valid detail cURL — an old one may have expired); no recruitment URL is needed. The resume run writes its own new checkpoint, so it can be resumed again if JDs are still missing. `output/_checkpoints/` must not be committed to Git.

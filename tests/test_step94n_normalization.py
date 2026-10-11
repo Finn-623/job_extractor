@@ -80,7 +80,7 @@ RENDER = ("岗位职责\n1. 负责 SMT 产线工艺调试，优化贴片程序�
 
 class FakePage:
     def __init__(self): self.urls = []
-    def goto(self, url, wait_until=None): self.urls.append(url)
+    def goto(self, url, wait_until=None, timeout=None): self.urls.append(url)
     def evaluate(self, *_a, **_k): return RENDER
     def close(self): pass
 

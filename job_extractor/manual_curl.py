@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import threading
 import json, os, re, shlex
 import time
-from typing import Any
+from typing import Any, Callable
+from pathlib import Path
 from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 import httpx
 from job_extractor.discovery.network_analyzer import get_path
@@ -15,6 +17,7 @@ from job_extractor.job_normalize import normalized_jd_halves, normalized_job_fie
 from job_extractor.models import CollectionMetrics, CollectionResult, Job
 from job_extractor.url_utils import normalize_url
 from job_extractor.step94h_debug import append as append_step94h_debug, enabled as step94h_debug_enabled
+from job_extractor.checkpoints import CheckpointWriter
 
 _ID_NAMES={"id","jobid","job_id","positionid","position_id","postid","postingid","requisitionid","code"}
 _PAGE_NAMES={"page","pageindex","pageno","page_number","currentpage"}
@@ -44,11 +47,13 @@ class DetailCurlRequired(ValueError):
     methods (LIST JD / detail spec / rendered page) and the caller may ask the
     user for a Detail cURL — or fall back to a legal LIST_ONLY completion.
     Carries full list context so the CLI never re-fetches the list."""
-    def __init__(self, resolution: Any, jobs: list[Job], context: dict[str, Any] | None = None):
+    def __init__(self, resolution: Any, jobs: list[Job], context: dict[str, Any] | None = None,
+                 task_states: dict[str, str] | None = None):
         super().__init__("DETAIL_CURL_REQUIRED")
         self.resolution=resolution
         self.jobs=jobs
         self.context=context or {}
+        self.task_states=task_states or {}
 
 @dataclass(frozen=True)
 class RequestSpec:
@@ -222,6 +227,50 @@ def _request_with_retry(client,spec):
             transient=True
         if not transient or attempt:raise
 
+
+class JDTimeBudget:
+    """Stage-level, cooperative JD budget; running threads are never abandoned."""
+    def __init__(self, seconds: float, on_timeout: Callable[[], str] | None = None):
+        self.seconds=max(0.0, seconds); self.on_timeout=on_timeout; self.deadline=None; self.skipped=False
+    def start(self) -> None:
+        if self.deadline is None:self.deadline=time.monotonic()+self.seconds
+    def remaining(self) -> float:
+        return float("inf") if self.deadline is None else max(0.0,self.deadline-time.monotonic())
+    def allow(self) -> bool:
+        self.start()
+        if self.remaining()>0:return True
+        if self.on_timeout is not None and self.on_timeout()=="continue":
+            self.deadline=time.monotonic()+self.seconds
+            return True
+        self.skipped=True
+        return False
+
+
+def _bounded_detail_futures(items, fn, workers: int, budget: JDTimeBudget, state_callback=None):
+    """Submit only within budget; on skip, drain started work before returning."""
+    iterator=iter(items); futures={}; results=[]; skipped=[]; stopping=False
+    draining_reported=False
+    def draining():
+        nonlocal draining_reported
+        if not draining_reported and state_callback is not None:
+            draining_reported=True; state_callback(running=len(futures))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        while True:
+            while not stopping and len(futures)<workers:
+                if not budget.allow():stopping=True;draining();break
+                try:item=next(iterator)
+                except StopIteration:break
+                futures[executor.submit(fn,item)]=item
+            if not futures:break
+            done,_=wait(futures,timeout=budget.remaining(),return_when=FIRST_COMPLETED)
+            if not done:
+                if not budget.allow():stopping=True;draining()
+                continue
+            for future in done:
+                item=futures.pop(future);results.append((item,future))
+        if stopping:skipped=list(iterator)
+    return results,skipped
+
 def _detail_record(value):
     if isinstance(value,dict):
         fields=pick_jd_fields(value)
@@ -259,7 +308,7 @@ def _auto_detail_api_spec(list_spec,campaign_prefix,job_id,recruit_type):
     body="postId="+quote_plus(str(job_id))+"&recruitType="+quote_plus(str(recruit_type))
     return RequestSpec("POST",url,headers,body)
 
-def _auto_detail_api_fill(client,list_spec,records,id_field,title_field,location_field,list_jobs,campaign_prefix,concurrency,progress_callback):
+def _auto_detail_api_fill(client,list_spec,records,id_field,title_field,location_field,list_jobs,campaign_prefix,concurrency,progress_callback,budget=None,task_states=None,concurrency_stats=None):
     """Fill teaser Jobs through the direct Detail API (priority 2).
 
     Probes the evidenced sibling detail route on the first job that needs a
@@ -270,9 +319,12 @@ def _auto_detail_api_fill(client,list_spec,records,id_field,title_field,location
     """
     needing=[(index,record) for index,record in enumerate(records) if list_jobs[index] is None]
     if not needing:return None
-    latencies: list[float] = []
+    latencies: list[float] = []; active=peak=0; active_lock=threading.Lock()
     def fill(index,record):
+        nonlocal active,peak
         started_at=time.monotonic()
+        with active_lock:
+            active+=1;peak=max(peak,active)
         try:
             spec=_auto_detail_api_spec(list_spec,campaign_prefix,record.get(id_field),record.get("recruitType"))
             if spec is None:raise ValueError("AUTO_API_ROUTE_NOT_EVIDENCED")
@@ -282,27 +334,41 @@ def _auto_detail_api_fill(client,list_spec,records,id_field,title_field,location
             if not jd or not credible_body(jd) or not (picked["responsibilities"] or picked["requirements"]):raise ValueError("DETAIL_JD_NOT_FOUND")
         finally:
             latencies.append(time.monotonic()-started_at)
+            with active_lock: active-=1
         resp_items,req_items=normalized_jd_halves(record,detail,picked)
         list_jobs[index]=Job(job_id=str(record[id_field]),job_title=str(record[title_field]),
                              **normalized_job_fields(record,detail),
                              responsibilities=resp_items,requirements=req_items,full_jd=jd,
                              source_url=list_spec.url,raw_data={"list":record,"detail":detail})
+        if task_states is not None: task_states[str(record[id_field])]="SUCCESS"
     ok=fail=0;total=len(needing)
     def report(title):
         if progress_callback:progress_callback("detail",done=ok+fail,total=total,ok=ok,fail=fail,title=title)
     try:workers=max(1,min(8,int(os.getenv("DETAIL_API_CONCURRENCY","") or concurrency)))
     except ValueError:workers=concurrency
+    if concurrency_stats is not None: concurrency_stats["configured"]=workers
+    if progress_callback: progress_callback("detail_api_probe_start",total=total)
+    if budget is not None and not budget.allow(): return 0,latencies,workers
     probe_index,probe_record=needing[0]
     try:fill(probe_index,probe_record);ok+=1;report(str(probe_record.get(title_field,"")))
-    except Exception:return None,[],workers  # stop immediately — no endpoint guessing
+    except Exception:
+        if task_states is not None: task_states[str(probe_record.get(id_field,""))]="FAILED"
+        if concurrency_stats is not None: concurrency_stats["peak"]=peak
+        return None,[],workers  # stop immediately — no endpoint guessing
     if total>1:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures={executor.submit(fill,index,record):record for index,record in needing[1:]}
-            for future in as_completed(futures):
-                record=futures[future]
-                try:future.result();ok+=1
-                except Exception:fail+=1
-                report(str(record.get(title_field,"")))
+        if progress_callback: progress_callback("detail_api_batch_start",total=total)
+        active_budget=budget or JDTimeBudget(float("inf"))
+        completed,skipped=_bounded_detail_futures(needing[1:],lambda item:fill(*item),workers,active_budget,
+            state_callback=(lambda **data: progress_callback("detail_budget_draining",total=total,**data)) if progress_callback else None)
+        for (_index,record),future in completed:
+            try:future.result();ok+=1
+            except Exception:
+                fail+=1
+                if task_states is not None: task_states[str(record.get(id_field,""))]="FAILED"
+            report(str(record.get(title_field,"")))
+        for _index,record in skipped:
+            fail+=1;report(str(record.get(title_field,"")))
+    if concurrency_stats is not None: concurrency_stats["peak"]=peak
     return ok,latencies,workers
 
 @dataclass
@@ -320,15 +386,21 @@ class ManualCurlResult:
     # STEP94N: AUTO_API timing evidence (empty for rendered/user-curl runs).
     detail_api_latencies:list[float]|None=None
     detail_api_concurrency:int=1
+    detail_api_peak_concurrency:int|None=None
+    # N7A: resume activity accounting — None for fresh collections. The keys
+    # preexisting/requested/new_success/failed/skipped/still_missing separate
+    # this-run activity from the pre-existing credible-JD state.
+    resume_stats:dict[str,int]|None=None
+    checkpoint_path:str|None=None  # N7A: this run's own checkpoint (for the next resume)
 
-def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max_pages:int=1000,concurrency:int=5,client:httpx.Client|None=None,progress_callback=None,detail_browser_factory=None,detail_page_url:str|None=None,campaign_context:str|None=None)->ManualCurlResult:
+def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max_pages:int=1000,concurrency:int=5,client:httpx.Client|None=None,progress_callback=None,detail_browser_factory=None,detail_page_url:str|None=None,campaign_context:str|None=None,jd_time_budget:float=300.0,jd_timeout_handler:Callable[[],str]|None=None,checkpoint_root:Path|None=None)->ManualCurlResult:
     list_spec=parse_curl(list_curl);detail_spec=parse_curl(detail_curl) if detail_curl else None;owned=client is None;client=client or httpx.Client(timeout=30,follow_redirects=True)
     # The public CLI URL can be a campaign host root.  A supplied List cURL's
     # Referer is direct, non-secret campaign-page evidence (e.g. /pb/school.html)
     # and augments—not replaces—the caller's public context.
     referer=next((str(value) for key,value in list_spec.headers.items() if key.casefold()=="referer"),"")
     effective_campaign_context=" ".join(value for value in (campaign_context,referer) if value)
-    started=time.monotonic();concurrency=min(max(1,concurrency),8)
+    started=time.monotonic();concurrency=min(max(1,concurrency),8);checkpoint=None;snapshot_jobs=lambda:[]
     try:
         payload=_request(client,list_spec);score,_evidence,shape=score_list(list_spec.url,payload)
         if confidence(score)!="HIGH" or shape.get("rejection_reasons"):raise ValueError("LIST_CURL_NOT_CREDIBLE_JOB_SOURCE")
@@ -389,7 +461,7 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
 
         if progress_callback:
             progress_callback("list_complete",fetched=list_fetched,total=total,unique=len(all_records))
-        location_field=infer_field(fields,"location")
+        location_field=infer_field(fields,"location");budget=JDTimeBudget(jd_time_budget,jd_timeout_handler)
         def list_job(record):
             if needs_detail_fetch(record,"DETAIL_FALLBACK"): return None
             jd,_state,_resp,_req=canonical_jd(record);picked=pick_jd_fields(record)
@@ -400,14 +472,33 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
                        responsibilities=resp_items,requirements=req_items,full_jd=jd,
                        source_url=list_spec.url,raw_data={"list":record})
         list_jobs=[list_job(record) for record in all_records]
+        def snapshot_jobs():
+            return [job if job is not None else Job(job_id=str(record.get(id_field,"")),job_title=str(record.get(title_field,"")),
+                    **normalized_job_fields(record,None),source_url=list_spec.url,raw_data={"list":record})
+                    for record,job in zip(all_records,list_jobs)]
+        if checkpoint_root is None:
+            from job_extractor.config import OUTPUT_ROOT
+            checkpoint_root=OUTPUT_ROOT
+        checkpoint=CheckpointWriter(checkpoint_root,list_spec.url)
+        task_states={str(record.get(id_field,"")): ("SUCCESS" if job is not None and job.full_jd else "PENDING")
+                     for record,job in zip(all_records,list_jobs)}
+        checkpoint.save(snapshot_jobs(),stage="JD_PENDING",task_states=task_states)
         if progress_callback:
             progress_callback("list_ready",fetched=list_fetched,total=total,unique=len(all_records))
+        detail_events=0
+        def checkpoint_progress(event,**data):
+            nonlocal detail_events
+            if progress_callback:progress_callback(event,**data)
+            if event=="detail":
+                detail_events+=1
+                if detail_events%10==0 or data.get("done")==data.get("total"):
+                    checkpoint.save(snapshot_jobs(),stage="JD_IN_PROGRESS",task_states=task_states)
         # STEP94 hard detail priority: LIST JD (above) -> detail spec (below) ->
         # rendered detail page (when a browser factory is wired) -> and only
         # then does the caller get to ask the user for a Detail cURL.
         auto_api_success=None
         auto_api_latencies:list[float]=[]
-        auto_api_workers=1
+        auto_api_workers=1;auto_api_stats:dict[str,int]={}
         if detail_spec is None and any(job is None for job in list_jobs):
             from job_extractor.collectors.detail_resolver import DetailResolution, extract_campaign_prefix, render_detail_jobs, resolve_targets
             resolution=DetailResolution()
@@ -420,7 +511,8 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
             # stops immediately — no endpoint guessing, rendered path as before.
             campaign_prefix=extract_campaign_prefix(list_spec.url)
             if campaign_prefix:
-                auto_api_success,auto_api_latencies,auto_api_workers=_auto_detail_api_fill(client,list_spec,all_records,id_field,title_field,location_field,list_jobs,campaign_prefix,concurrency,progress_callback)
+                auto_api_success,auto_api_latencies,auto_api_workers=_auto_detail_api_fill(client,list_spec,all_records,id_field,title_field,location_field,list_jobs,campaign_prefix,concurrency,checkpoint_progress,budget,task_states,auto_api_stats)
+                append_step94h_debug(phase="JD_API_COMPLETE", total=len(all_records), succeeded=auto_api_success or 0)
             # Placeholder Jobs (created only after the API fast path) keep the
             # list complete so the resolver can classify them and LIST_ONLY
             # mode can still save every posting.
@@ -448,10 +540,10 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
             if os.getenv("STEP94H_STOP_AFTER_FIRST")=="1":
                 targets=targets[:1]
             if targets and detail_browser_factory is not None:
+                append_step94h_debug(phase="JD_RENDER_FALLBACK_START", total=len(targets))
                 if step94h_debug_enabled():
                     append_step94h_debug(phase="before_render", debug_enabled=True)
-                if progress_callback:
-                    progress_callback("rendered_start",total=len(targets))
+                checkpoint_progress("rendered_start",total=len(targets))
                 try:
                     debug_context=({"campaign_source_url":detail_page_url or list_spec.url,"campaign_context":effective_campaign_context or None} if os.getenv("STEP94H_DEBUG")=="1" else None)
                     def relay(event,**data):
@@ -468,21 +560,38 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
                             append_step94h_debug(phase="detail_debug", title=record["title"], post_id=record["postId"],
                                                  candidate_url=record.get("candidate_url"), failure_code=record.get("failure_code"),
                                                  failure_reason=record.get("failure_reason"), elapsed=record["resolver_elapsed"])
-                        if progress_callback: progress_callback("detail_debug" if event=="detail_debug" else "detail",**data)
+                        checkpoint_progress("detail_debug" if event=="detail_debug" else "detail",**data)
                     success,fail=render_detail_jobs(detail_browser_factory,targets,concurrency=1,timeout_s=12.0,total_timeout_s=25.0,
-                                                    progress_callback=relay if progress_callback else None,debug_context=debug_context)
+                                                    progress_callback=relay if progress_callback else None,debug_context=debug_context,
+                                                    should_start=budget.allow)
                 except Exception:
                     success,fail=0,len(targets)
                 resolution.rendered_page_attempted=True
                 resolution.rendered_page_success, resolution.rendered_page_failed=success,fail
+                append_step94h_debug(phase="JD_RENDER_FALLBACK_END", total=len(targets), succeeded=success, failed=fail)
+                # A renderer is permitted to emit only diagnostic callbacks.
+                # Always publish the terminal aggregate so the UI cannot retain
+                # a stale first-item update.
+                checkpoint_progress("detail",done=len(targets),total=len(targets),ok=success,fail=fail)
+                for job in list_jobs:
+                    task_states[str(job.job_id)]="SUCCESS" if job.full_jd else "FAILED"
             resolution.jd_success=len([job for job in list_jobs if job.full_jd])
             resolution.jd_failed=len([job for job in list_jobs if not job.full_jd])
             resolution.jd_missing=resolution.jd_failed
-            if resolution.jd_failed:
+            if resolution.jd_failed and not budget.skipped:
                 raise DetailCurlRequired(resolution,list_jobs,
                     context={"path":path,"total":total,"score":score,"list_fetched":list_fetched,
                              "unique":len(all_records),"termination":termination,"pages":pages,
-                             "elapsed":time.monotonic()-started,"url":list_spec.url})
+                             "elapsed":time.monotonic()-started,"url":list_spec.url,
+                             "checkpoint_path":str(checkpoint.path),"detail_api_workers":auto_api_workers,
+                             "detail_api_peak_concurrency":auto_api_stats.get("peak"),
+                             "detail_api_latencies":auto_api_latencies}, task_states=task_states)
+            if budget.skipped:
+                reasons=[(job.job_id,"JD_TIME_BUDGET_SKIPPED") for job in list_jobs if not job.full_jd]
+                task_states.update({job_id:"SKIPPED" for job_id,_ in reasons})
+                checkpoint.save(snapshot_jobs(),stage="JD_SKIPPED",task_states=task_states)
+                append_step94h_debug(phase="JD_COLLECTION_RETURN", total=len(list_jobs), succeeded=resolution.jd_success, failed=len(reasons), status="PARTIAL")
+                return ManualCurlResult(path,total,score,confidence(score),list_jobs,len(reasons),list_fetched,len(all_records),reasons,"PARTIAL",termination,time.monotonic()-started,pages)
         else:
             resolution=None
             if detail_spec is None:
@@ -498,6 +607,8 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
             result.detail_resolution=resolution
             result.detail_api_latencies=auto_api_latencies
             result.detail_api_concurrency=auto_api_workers if auto_api_success else 1
+            result.detail_api_peak_concurrency=auto_api_stats.get("peak")
+            checkpoint.save(snapshot_jobs(),stage="JD_COMPLETE",task_states=task_states)
             return result
         if detail_spec is None:
             # STEP94: LIST_ONLY is a legal completion when no detail evidence
@@ -505,6 +616,7 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
             # already raised DetailCurlRequired above.)
             result=ManualCurlResult(path,total,score,confidence(score),list_jobs,0,list_fetched,len(all_records),[],"COMPLETE" if total is not None and list_fetched>=total else "PARTIAL",termination,time.monotonic()-started,pages,"LIST_ONLY")
             result.detail_resolution=resolution
+            checkpoint.save(snapshot_jobs(),stage="JD_NOT_REQUESTED",task_states=task_states)
             return result
         def resolve_detail(record):
             try:
@@ -520,23 +632,114 @@ def run_manual_curl(list_curl:str,detail_curl:str|None,*,max_jobs:int|None=5,max
                            source_url=list_spec.url,raw_data={"list":record,"detail":detail}),None
             except Exception as exc:return None,(str(record.get(id_field,"")),str(exc))
         detail_results=[None]*len(all_records)
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures={executor.submit(resolve_detail,record):index for index,record in enumerate(all_records)}
-            succeeded=failed=0
-            for future in as_completed(futures):
-                index=futures[future]
+        detail_items=list(enumerate(all_records));succeeded=failed=0
+        completed,skipped=_bounded_detail_futures(detail_items,lambda item:resolve_detail(item[1]),concurrency,budget)
+        for (index,record),future in completed:
                 detail_results[index]=future.result()
+                if detail_results[index][0] is not None:list_jobs[index]=detail_results[index][0]
                 if detail_results[index][0] is None: failed+=1
                 else: succeeded+=1
-                if progress_callback:
-                    progress_callback("detail",done=succeeded+failed,total=len(all_records),ok=succeeded,fail=failed,title=str(all_records[index].get(title_field,"")))
+                checkpoint_progress("detail",done=succeeded+failed,total=len(all_records),ok=succeeded,fail=failed,title=str(record.get(title_field,"")))
+        for index,record in skipped:
+                detail_results[index]=(Job(job_id=str(record.get(id_field,"")),job_title=str(record.get(title_field,"")),**normalized_job_fields(record,None),source_url=list_spec.url,raw_data={"list":record}),
+                                       (str(record.get(id_field,"")),"JD_TIME_BUDGET_SKIPPED"))
+                list_jobs[index]=detail_results[index][0]
+                failed+=1
+                checkpoint_progress("detail",done=succeeded+failed,total=len(all_records),ok=succeeded,fail=failed,title=str(record.get(title_field,"")))
         jobs=[job for job,error in detail_results if job is not None]
         failed_reasons=[error for job,error in detail_results if error is not None]
         complete_list=total is not None and list_fetched>=total
         status="COMPLETE" if complete_list and not failed_reasons else "PARTIAL"
+        states={job_id:("SKIPPED" if reason=="JD_TIME_BUDGET_SKIPPED" else "FAILED") for job_id,reason in failed_reasons}
+        task_states.update(states)
+        for job in jobs:
+            task_states[str(job.job_id)]="SUCCESS"
+        checkpoint.save(snapshot_jobs(),stage="JD_COMPLETE" if not states else "JD_PARTIAL",task_states=task_states)
+        append_step94h_debug(phase="JD_COLLECTION_RETURN", total=len(all_records), succeeded=len(jobs), failed=len(failed_reasons), status=status)
         return ManualCurlResult(path,total,score,confidence(score),jobs,len(failed_reasons),list_fetched,len(all_records),failed_reasons,status,termination,time.monotonic()-started,pages)
+    except DetailCurlRequired:
+        # This is an expected escalation, not an aborted collection.  Preserve
+        # the usable list and its per-job state for the menu/resume path.
+        if checkpoint is not None:
+            checkpoint.save(snapshot_jobs(),stage="JD_PARTIAL",task_states=task_states)
+        append_step94h_debug(phase="JD_WAIT_DETAIL_CURL")
+        raise
+    except BaseException:
+        if checkpoint is not None:
+            checkpoint.save(snapshot_jobs(),stage="JD_ABORTED",task_states=task_states)
+        raise
+    finally:
+        if owned:
+            append_step94h_debug(phase="RESOURCE_CLEANUP_START")
+            client.close()
+            append_step94h_debug(phase="RESOURCE_CLEANUP_END")
+
+def load_jd_checkpoint(path: Path) -> tuple[list[Job],dict[str,str],str]:
+    try:payload=json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:raise ValueError("CHECKPOINT_NOT_FOUND")
+    except (OSError,json.JSONDecodeError) as exc:raise ValueError("CHECKPOINT_INVALID") from exc
+    if payload.get("format")!="job-extractor-jd-checkpoint-v1":raise ValueError("CHECKPOINT_UNSUPPORTED")
+    if not isinstance(payload.get("source_url"),str) or not isinstance(payload.get("jobs"),list):raise ValueError("CHECKPOINT_INVALID")
+    try:jobs=[Job.model_validate(value) for value in payload["jobs"]]
+    except Exception as exc:raise ValueError("CHECKPOINT_INVALID") from exc
+    states=payload.get("task_states") or {}
+    return jobs,{str(key):str(value) for key,value in states.items()},payload["source_url"]
+
+
+def resume_manual_checkpoint(checkpoint_path: Path, detail_curl: str, *, concurrency: int=5,
+                             client:httpx.Client|None=None, progress_callback=None,
+                             jd_time_budget:float=300.0,jd_timeout_handler:Callable[[],str]|None=None,
+                             checkpoint_root:Path|None=None) -> ManualCurlResult:
+    """Retry only incomplete checkpoint jobs using a freshly supplied Detail cURL."""
+    jobs,states,source_url=load_jd_checkpoint(checkpoint_path);spec=parse_curl(detail_curl)
+    owned=client is None;client=client or httpx.Client(timeout=30,follow_redirects=True)
+    if checkpoint_root is None:
+        from job_extractor.config import OUTPUT_ROOT
+        checkpoint_root=OUTPUT_ROOT
+    writer=CheckpointWriter(checkpoint_root,source_url,str(checkpoint_path))
+    budget=JDTimeBudget(jd_time_budget,jd_timeout_handler)
+    def complete(job:Job)->bool:return bool(job.full_jd and credible_body(job.full_jd))
+    targets=[(index,job) for index,job in enumerate(jobs) if not complete(job)]
+    preexisting=len(jobs)-len(targets)
+    writer.save(jobs,stage="JD_RESUME_PENDING",task_states=states)
+    def fetch(item):
+        index,job=item
+        try:
+            if not job.job_id:raise ValueError("LIST_JOB_ID_MISSING")
+            detail=_detail_record(_request_with_retry(client,spec.render_job_id(str(job.job_id))))
+            if not detail:raise ValueError("DETAIL_JD_NOT_FOUND")
+            jd,_state,_resp,_req=canonical_jd(detail);picked=pick_jd_fields(detail)
+            if not jd or not (picked["responsibilities"] or picked["requirements"]):raise ValueError("DETAIL_JD_NOT_FOUND")
+            record=job.raw_data.get("list",{}) if isinstance(job.raw_data,dict) else {}
+            resp,req=normalized_jd_halves(record,detail,picked)
+            job.full_jd=jd;job.responsibilities=resp;job.requirements=req
+            return index,None
+        except Exception as exc:return index,str(exc)
+    try:
+        completed,skipped=_bounded_detail_futures(targets,fetch,min(max(1,concurrency),8),budget)
+        succeeded=failed=0
+        for item,future in completed:
+            index,error=future.result();job=jobs[index]
+            if error is None:succeeded+=1;states.pop(str(job.job_id),None)
+            else:failed+=1;states[str(job.job_id)]="FAILED"
+            if progress_callback:progress_callback("detail",done=succeeded+failed,total=len(targets),ok=succeeded,fail=failed,title=job.job_title)
+            if (succeeded+failed)%10==0:writer.save(jobs,stage="JD_RESUME_IN_PROGRESS",task_states=states)
+        for position,(index,job) in enumerate(skipped,1):
+            states[str(job.job_id)]="SKIPPED"
+            if progress_callback:progress_callback("detail",done=len(completed)+position,total=len(targets),ok=succeeded,fail=failed,title=job.job_title)
+        skipped_count=len(skipped)
+        unresolved=[job for job in jobs if not complete(job)]
+        final_states={str(job.job_id):states.get(str(job.job_id),"PENDING") for job in unresolved}
+        writer.save(jobs,stage="JD_RESUME_COMPLETE" if not final_states else "JD_RESUME_PARTIAL",task_states=final_states)
+        reasons=[(str(job.job_id),final_states[str(job.job_id)]) for job in unresolved]
+        status="COMPLETE" if not reasons else "PARTIAL"
+        resume_stats={"preexisting":preexisting,"requested":len(targets),"new_success":succeeded,
+                      "failed":failed,"skipped":skipped_count,"still_missing":len(unresolved)}
+        return ManualCurlResult("checkpoint",len(jobs),0,"HIGH",jobs,len(reasons),len(jobs),len(jobs),reasons,status,"RESUMED",0.0,0,
+                                resume_stats=resume_stats,checkpoint_path=str(writer.path))
     finally:
         if owned:client.close()
+
 
 def manual_result_to_collection_result(result:ManualCurlResult,source_url:str)->CollectionResult:
     """Expose explicit cURL collection through the standard result contract."""
@@ -554,16 +757,22 @@ def manual_result_to_collection_result(result:ManualCurlResult,source_url:str)->
     # STEP94N: real AUTO_API timing/concurrency evidence when available.
     api_latencies=list(getattr(result,"detail_api_latencies",None) or [])
     detail_seconds=sum(api_latencies)
+    resume_stats=getattr(result,"resume_stats",None)
+    detail_requests=resume_stats["requested"] if resume_stats else result.unique_jobs
+    details_attempted=0 if (list_sufficient or list_only) else detail_requests
+    details_succeeded=detail_succeeded if not resume_stats else resume_stats["preexisting"]+resume_stats["new_success"]
+    details_failed=detail_failed if not resume_stats else resume_stats["still_missing"]
     metrics=CollectionMetrics(list_requests=result.list_pages,list_pages=result.list_pages,
         pages_requested=result.list_pages,pages_succeeded=result.list_pages,
         raw_rows=result.list_fetched,unique_jobs=result.unique_jobs,duplicate_jobs=duplicates,
-        detail_requests=0 if (list_sufficient or list_only) else result.unique_jobs,details_attempted=0 if (list_sufficient or list_only) else result.unique_jobs,
-        details_succeeded=detail_succeeded,details_failed=detail_failed,
+        detail_requests=0 if (list_sufficient or list_only) else detail_requests,
+        details_attempted=details_attempted,
+        details_succeeded=details_succeeded,details_failed=details_failed,
         elapsed_seconds=result.runtime_seconds,termination_reason=result.list_termination,
         collection_mode="MANUAL_CURL",jd_strategy=metric_strategy,
         detail_request_seconds=round(detail_seconds,3),
         average_detail_request_seconds=round(detail_seconds/len(api_latencies),4) if api_latencies else 0.0,
-        max_concurrency_observed=max(1,int(getattr(result,"detail_api_concurrency",1) or 1)))
+        max_concurrency_observed=max(1,int(getattr(result,"detail_api_peak_concurrency",None) or 1)))
     warnings=[f"SOURCE_CROSS_PAGE_DUPLICATES raw_total={result.total} duplicate_records={duplicates}"] if duplicates else []
     if detail_resolution is not None:
         warnings.append(f"DETAIL_METHOD {detail_resolution.detail_method}")
@@ -572,6 +781,8 @@ def manual_result_to_collection_result(result:ManualCurlResult,source_url:str)->
     # leak through as the company.
     from job_extractor.company_identity import resolve_collection_company
     company = resolve_collection_company(result.jobs, None, source_url)
+    enrichment={"detail_resolution":detail_resolution.audit()} if detail_resolution is not None else {}
+    if resume_stats:enrichment["resume_stats"]=resume_stats  # N7A: this-run resume activity (see collection.json)
     return CollectionResult(source_url=source_url,platform="manual_curl",company=company,metrics=metrics,
         total_expected=result.total,total_fetched=result.list_fetched,total_unique=result.unique_jobs,
         status=status,jobs=result.jobs,warnings=warnings,
@@ -579,4 +790,4 @@ def manual_result_to_collection_result(result:ManualCurlResult,source_url:str)->
         duplicate_audit={"raw_total":result.total,"raw_fetched":result.list_fetched,
             "unique_jobs":result.unique_jobs,"duplicate_records":duplicates,
             "source_cross_page_duplicates":bool(duplicates)},
-        enrichment={"detail_resolution":detail_resolution.audit()} if detail_resolution is not None else {})
+        enrichment=enrichment)

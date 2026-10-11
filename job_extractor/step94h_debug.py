@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ _ALLOWED = {"phase", "title", "post_id", "candidate_url", "exception_class",
             "debug_enabled", "final_page_url", "ready_state", "body_text_length",
             "body_text_preview", "root_text_length", "document_title",
             "console_error_count", "failed_request_count", "failed_requests",
-            "browser_executable", "headless"}
+            "browser_executable", "headless", "timestamp", "total", "succeeded", "failed", "status"}
 
 
 def enabled() -> bool:
@@ -33,6 +34,7 @@ def append(**values: Any) -> None:
     """Append one allow-listed record synchronously; never write request data."""
     if not enabled():
         return
+    values.setdefault("timestamp", round(time.time(), 3))
     record = {key: value for key, value in values.items() if key in _ALLOWED and value is not None}
     with DEBUG_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")

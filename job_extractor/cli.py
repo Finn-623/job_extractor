@@ -25,14 +25,15 @@ from job_extractor.progress import ProgressReporter, translate_reason  # STEP92:
 from job_extractor.discovery import load_reusable_discovery
 from job_extractor.discovery.runtime_data import resolve_encrypted_runtime_terminal
 from job_extractor.discovery.stability import stable_navigation
-from job_extractor.manual_curl import DetailCurlRequired, ManualCurlResponseError, PageReplayRejected, manual_result_to_collection_result, parse_curl, run_manual_curl
+from job_extractor.manual_curl import DetailCurlRequired, ManualCurlResponseError, PageReplayRejected, manual_result_to_collection_result, parse_curl, resume_manual_checkpoint, run_manual_curl
 from job_extractor.har_importer import HarImportResult, import_har
-from job_extractor.step94h_debug import initialize as initialize_step94h_debug
+from job_extractor.step94h_debug import append as append_step94h_debug, initialize as initialize_step94h_debug
 
 app = typer.Typer(add_completion=False, invoke_without_command=True)
 
 def generate_and_render_reports(result,run_directory,adapter_name,reporter=None):
     started=perf_counter()
+    append_step94h_debug(phase="EXPORT_START", total=result.total_unique, status=result.status)
     if reporter is not None:  # spec N: per-file save state for stage [5/5]
         names=["error_report.json"] if result.status=="FAILED" else ["jobs.json","jobs.xlsx","jobs.csv","collection.json","report.md"]
         for nm in names:reporter.save_line(nm)
@@ -45,6 +46,7 @@ def generate_and_render_reports(result,run_directory,adapter_name,reporter=None)
     result.metrics.export_seconds=perf_counter()-started
     if result.status!="FAILED":  # FAILED runs record only error_report.json (STEP91).
         export_collection_result(result,artifacts.json_path)
+    append_step94h_debug(phase="EXPORT_END", total=result.total_unique, status=result.status)
     return (f"Detected platform: {result.platform}\nAdapter: {adapter_name}\n\nCollection complete.\n\nExpected: {result.total_expected}\nFetched: {result.total_fetched}\nUnique: {result.total_unique}\nStatus: {result.status}\n\nReports:\n"
             f"  JSON: {artifacts.json_path}\n  Excel: {artifacts.excel_path}\n  Markdown: {artifacts.markdown_path}")
 
@@ -60,6 +62,9 @@ def _failure_stage(result) -> tuple[int,str]:
 
 def _finalize_stages(result,adapter_name,reporter,cli_started=None) -> None:
     """STEP92/96: stage [5/5] save + ✓ close + Chinese summary (no legacy text)."""
+    append_step94h_debug(phase="COLLECTION_RESULT_READY", total=result.total_unique,
+                         succeeded=result.metrics.details_succeeded, failed=result.metrics.details_failed,
+                         status=result.status)
     reporter.stage(5)
     # Older tests stub generate_and_render_reports with the 3-arg signature.
     if "reporter" in inspect.signature(generate_and_render_reports).parameters:
@@ -146,6 +151,17 @@ def _stdin_is_interactive() -> bool:
     """Keep automated runs/CI from ever waiting for fallback input."""
     return bool(getattr(sys.stdin, "isatty", lambda: False)())
 
+def _jd_timeout_handler(mode: str, reporter: ProgressReporter|None=None) -> str:
+    """Never wait for input outside a TTY; callers extend one stage budget at a time."""
+    if mode=="skip" or not _stdin_is_interactive(): return "skip"
+    if reporter is not None: reporter.stop_heartbeat()
+    try:
+        answer=typer.prompt("JD 补全达到时间预算：[1] 继续 300 秒 [2] 跳过并保存 [1]",default="1",show_default=False).strip()
+        return "skip" if answer=="2" else "continue"
+    finally:
+        if reporter is not None and reporter.current is not None and not reporter.terminal:
+            reporter._start_heartbeat(); reporter._refresh()
+
 def _read_curl_block(label: str) -> str | None:
     """Read pasted text only; it is parsed later and never sent to a shell."""
     typer.echo(f"请粘贴 {label}，完成后输入 END：")
@@ -201,13 +217,30 @@ def _detail_page_factory(reporter):
     return factory
 
 def _detail_curl_menu(url: str, reporter: ProgressReporter, list_curl: str,
-                      exc: DetailCurlRequired, observe):
-    """After auto methods fail: Detail cURL (default), List-only, or cancel.
-    List-only is a legal completion — files are written, status stays COMPLETE."""
+                      exc: DetailCurlRequired, observe, jd_time_budget: float=300.0,
+                      jd_timeout_handler=None):
+    """Resolve an expected missing-JD escalation without discarding jobs."""
     resolution=exc.resolution
+    ctx=exc.context
+    def partial_result():
+        from job_extractor.manual_curl import ManualCurlResult
+        missing=[job for job in exc.jobs if not job.full_jd]
+        reasons=[(str(job.job_id), exc.task_states.get(str(job.job_id),"PENDING")) for job in missing]
+        result=ManualCurlResult(ctx.get("path",""),ctx.get("total"),ctx.get("score",0),"HIGH",
+            exc.jobs,len(reasons),ctx.get("list_fetched",0),ctx.get("unique",0),reasons,
+            "PARTIAL",ctx.get("termination",""),ctx.get("elapsed",0.0),ctx.get("pages",0),"DETAIL_REQUIRED")
+        result.detail_resolution=resolution
+        result.detail_api_concurrency=int(ctx.get("detail_api_workers") or 1)
+        result.detail_api_peak_concurrency=ctx.get("detail_api_peak_concurrency")
+        result.detail_api_latencies=list(ctx.get("detail_api_latencies") or [])
+        return result
     typer.echo("")
     typer.echo(f"未能自动获取完整 JD（{resolution.jd_failed} 个岗位）。")
-    answer=typer.prompt("1. 提供 Detail / JD cURL\n2. 仅保存当前岗位 List\n3. 取消\n选择 [1]", default="1", show_default=False).strip().lower()
+    if not _stdin_is_interactive():
+        typer.echo("非交互模式：保存已获取的部分结果。")
+        append_step94h_debug(phase="JD_SAVE_PARTIAL", total=len(exc.jobs), failed=resolution.jd_failed)
+        return partial_result()
+    answer=typer.prompt("1. 提供 Detail / JD cURL\n2. 保存现有结果（含已获取 JD）\n3. 取消\n选择 [1]", default="1", show_default=False).strip().lower()
     if answer=="3":
         typer.echo("已取消。")
         reporter.stage_fail(4,"DETAIL_CANCELLED"); reporter.failed_summary(4,"DETAIL_CANCELLED")
@@ -215,15 +248,8 @@ def _detail_curl_menu(url: str, reporter: ProgressReporter, list_curl: str,
                                 curl_failure_stage="DETAIL",curl_failure_code="CANCEL",curl_failure_reason="CANCEL")
         return None
     if answer=="2":
-        from job_extractor.manual_curl import ManualCurlResult
-        ctx=exc.context
-        result=ManualCurlResult(ctx.get("path",""),ctx.get("total"),ctx.get("score",0),"HIGH",
-            exc.jobs,0,ctx.get("list_fetched",0),ctx.get("unique",0),[],
-            "COMPLETE" if ctx.get("total") is not None and ctx.get("list_fetched",0)>=ctx.get("total") else "PARTIAL",
-            ctx.get("termination",""),ctx.get("elapsed",0.0),ctx.get("pages",0),"LIST_ONLY")
-        result.detail_resolution=resolution
-        resolution.list_only_used=True
-        return result
+        append_step94h_debug(phase="JD_SAVE_PARTIAL", total=len(exc.jobs), failed=resolution.jd_failed)
+        return partial_result()
     # default: user Detail cURL — resume detail extraction on the saved list
     detail_curl=_read_curl_block("Detail / JD cURL")
     if detail_curl is None:
@@ -237,14 +263,13 @@ def _detail_curl_menu(url: str, reporter: ProgressReporter, list_curl: str,
         _write_fallback_failure(url,"DETAIL_CURL_PARSE_FAILED","DETAIL",fallback_attempted=True,
                                 curl_failure_stage="DETAIL",curl_failure_code="PARSE_FAILED",curl_failure_reason="DETAIL_CURL_PARSE_FAILED")
         return None
-    from job_extractor.manual_curl import ManualCurlResult
-    ctx=exc.context
-    partial=ManualCurlResult(ctx.get("path",""),ctx.get("total"),ctx.get("score",0),"HIGH",
-        exc.jobs,0,ctx.get("list_fetched",0),ctx.get("unique",0),[],
-        "COMPLETE" if ctx.get("total") is not None and ctx.get("list_fetched",0)>=ctx.get("total") else "PARTIAL",
-        ctx.get("termination",""),ctx.get("elapsed",0.0),ctx.get("pages",0),"LIST_ONLY")
-    partial.detail_resolution=resolution
-    return run_manual_curl(list_curl,detail_curl,max_jobs=None,progress_callback=observe)
+    append_step94h_debug(phase="JD_CONTINUE_DETAIL_CURL", total=len(exc.jobs))
+    reporter.resume_current()
+    # Resume from the checkpoint produced for this exact list: do not replay
+    # the list request or overwrite the already successful JD values.
+    return resume_manual_checkpoint(Path(ctx["checkpoint_path"]),detail_curl,
+                                    progress_callback=observe,jd_time_budget=jd_time_budget,
+                                    jd_timeout_handler=jd_timeout_handler)
 
 def _write_fallback_failure(url: str, code: str, stage: str, **extra) -> None:
     audit=_fallback_audit(url,code,stage,**extra)
@@ -461,7 +486,8 @@ def _browser_assist_menu(url: str, reporter: ProgressReporter, *,
         reporter.use_curl_fallback()
         return _run_har_fallback(url,reporter,har_path,auto_code,auto_stage)
 
-def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_code: str, auto_stage: str="DISCOVERY") -> bool:
+def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_code: str, auto_stage: str="DISCOVERY",
+                               jd_time_budget: float=300.0, jd_on_timeout: str="ask") -> bool:
     """Bridge an auto failure to the existing safe Manual cURL collector."""
     if not _stdin_is_interactive():
         _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=False)
@@ -486,6 +512,7 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
         _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="LIST",curl_failure_code="PARSE_FAILED",curl_failure_reason="LIST_CURL_PARSE_FAILED")
         return False
     reporter.use_curl_fallback(); reporter.stage(2); detail_started=False
+    jd_timeout_handler=lambda: _jd_timeout_handler(jd_on_timeout,reporter)
     def observe(event: str, **data) -> None:
         nonlocal detail_started
         if event=="list":
@@ -501,6 +528,14 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
             if data.get("failure_code"):
                 reporter.error(job_id=data.get("post_id"),title=data.get("title"),stage="DETAIL",
                                message=data.get("failure_reason") or data["failure_code"])
+        elif event=="detail_api_probe_start":
+            reporter.detail_phase("api_probe",total=data.get("total"),reset_progress=True)
+        elif event=="detail_api_batch_start":
+            reporter.detail_phase("api_batch",total=data.get("total"))
+        elif event=="rendered_start":
+            reporter.detail_phase("fallback",total=data.get("total"),reset_progress=True)
+        elif event=="detail_budget_draining":
+            reporter.detail_phase("budget_draining",draining=data.get("running"))
         elif event=="detail_debug" and os.getenv("STEP94H_DEBUG")=="1":
             detail=data.get("detail") or {}
             safe={key:detail.get(key) for key in ("campaign_source_url","campaign_context","browser_factory","browser_launch_elapsed","resolver_state_id","pattern_locked","candidate_url","navigation_wait","navigation_elapsed","final_page_url","body_text_length","ready_state","jd_heading_found","responsibilities_found","requirements_found","failure_stage","failure_code","failure_reason") if key in detail}
@@ -510,7 +545,8 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
         try:
             manual=run_manual_curl(list_curl,None,max_jobs=None,progress_callback=observe,
                                    detail_browser_factory=_detail_page_factory(reporter),
-                                   detail_page_url=url,campaign_context=url)
+                                   detail_page_url=url,campaign_context=url,
+                                   jd_time_budget=jd_time_budget,jd_timeout_handler=jd_timeout_handler)
             break
         except PageReplayRejected as exc:
             stage=4 if detail_started else 2
@@ -547,6 +583,7 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
                        "你可以重新复制 cURL，或改用浏览器辅助采集。")
             answer=typer.prompt("[1] 重新粘贴 cURL\n[2] 使用浏览器辅助采集\n[3] 退出\n选择 [1]",
                                 default="1", show_default=False).strip().lower()
+            if answer=="1":reporter.reset_final_summary()  # N7A: the retry may still finish successfully
             if answer=="2":
                 return _browser_assist_menu(url,reporter,auto_code=auto_code,
                                           auto_stage=auto_stage, jobs_count=None,
@@ -575,7 +612,8 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
             _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage=stage,curl_failure_code=exc.code,curl_failure_reason=translate_reason(exc.code))
             return False
         except DetailCurlRequired as exc:
-            manual=_detail_curl_menu(url,reporter,list_curl,exc,observe)
+            reporter.pause_current()
+            manual=_detail_curl_menu(url,reporter,list_curl,exc,observe,jd_time_budget,jd_timeout_handler)
             if manual is None: return False
             break
         except ValueError as exc:
@@ -590,7 +628,8 @@ def _interactive_curl_fallback(url: str, reporter: ProgressReporter, *, auto_cod
                 typer.echo(f"cURL 解析失败\n原因：{parse_error}")
                 _write_fallback_failure(url,auto_code,auto_stage,fallback_attempted=True,curl_failure_stage="DETAIL",curl_failure_code="PARSE_FAILED",curl_failure_reason="DETAIL_CURL_PARSE_FAILED")
                 return False
-            manual=run_manual_curl(list_curl,detail_curl,max_jobs=None,progress_callback=observe)
+            manual=run_manual_curl(list_curl,detail_curl,max_jobs=None,progress_callback=observe,
+                                   jd_time_budget=jd_time_budget,jd_timeout_handler=jd_timeout_handler)
             break
         except Exception as exc:
             stage=4 if detail_started else 2; reporter.stage_fail(stage,str(exc)); reporter.failed_summary(stage,str(exc))
@@ -620,6 +659,8 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 def valid_http_url(value: str) -> str:
+    if value is None:  # N7A: the URL argument is optional for --resume-checkpoint runs.
+        return None
     try:
         return normalize_url(value)
     except ValueError as exc:
@@ -637,7 +678,10 @@ def main(
     detail_curl: str|None = typer.Option(None,"--detail-curl",help="Explicit public detail cURL; parsed but never shell-executed."),
     list_curl_file: Path|None = typer.Option(None,"--list-curl-file",help="UTF-8 file containing an explicit public list cURL."),
     detail_curl_file: Path|None = typer.Option(None,"--detail-curl-file",help="UTF-8 file containing an explicit public detail cURL."),
+    resume_checkpoint: Path|None = typer.Option(None,"--resume-checkpoint",help="Resume incomplete JD jobs from a checkpoint with --detail-curl."),
     scope: str|None = typer.Option(None,"--scope",help="Resolve an ambiguous recruitment scope: campus, social, intern, or all."),
+    jd_time_budget: float = typer.Option(300.0,"--jd-time-budget",min=0.0,help="JD 补全阶段预算（秒）。"),
+    jd_on_timeout: str|None = typer.Option(None,"--jd-on-timeout",help="预算到达后 ask 或 skip；非 TTY 默认 skip。"),
 ) -> None:
     initialize_step94h_debug()
     if list_curl_file:
@@ -646,9 +690,31 @@ def main(
     if detail_curl_file:
         if detail_curl:raise typer.BadParameter("Use either --detail-curl or --detail-curl-file, not both.")
         detail_curl=detail_curl_file.read_text(encoding="utf-8")
+    if jd_on_timeout is not None and jd_on_timeout not in {"ask","skip"}:
+        raise typer.BadParameter("jd-on-timeout must be ask or skip.",param_hint="--jd-on-timeout")
+    jd_mode=jd_on_timeout or ("ask" if _stdin_is_interactive() else "skip")
+    if resume_checkpoint:
+        if not detail_curl:raise typer.BadParameter("--resume-checkpoint requires --detail-curl or --detail-curl-file.")
+        source=url or "checkpoint"
+        reporter=ProgressReporter();reporter.begin(source)
+        def observe(event: str, **data) -> None:
+            if event=="detail":
+                reporter.detail_progress(data["done"],data["total"],data.get("ok",0),data.get("fail",0),data.get("title"))
+        try:result=resume_manual_checkpoint(resume_checkpoint,detail_curl,jd_time_budget=jd_time_budget,
+                                             jd_timeout_handler=lambda:_jd_timeout_handler(jd_mode),
+                                             progress_callback=observe)
+        except ValueError as exc:raise typer.BadParameter(str(exc),param_hint="--resume-checkpoint") from exc
+        source=url or (result.jobs[0].source_url if result.jobs else "checkpoint")
+        unified=manual_result_to_collection_result(result,source);ensure_directories()
+        if getattr(result,"checkpoint_path",None):
+            typer.echo(f"续抓检查点：{result.checkpoint_path}")
+        reporter.stage(1);reporter.stage(2);reporter.stage(3);reporter.stage(4)
+        _finalize_stages(unified,"ManualCurlResume",reporter)
+        return
     if list_curl or detail_curl:
         if not list_curl or not detail_curl:raise typer.BadParameter("Both --list-curl and --detail-curl are required.")
-        try:result=run_manual_curl(list_curl,detail_curl,max_jobs=None)
+        try:result=run_manual_curl(list_curl,detail_curl,max_jobs=None,jd_time_budget=jd_time_budget,
+                                   jd_timeout_handler=lambda:_jd_timeout_handler(jd_mode))
         except Exception as exc:typer.echo(f"Manual cURL fallback failed: {type(exc).__name__}: {exc}");return
         source=(url or result.jobs[0].source_url) if result.jobs else (url or "manual-curl")
         unified=manual_result_to_collection_result(result,source)
@@ -720,7 +786,7 @@ def main(
             result=generic.discover(url)
         except Exception as exc:  # STEP76A2: discovery always renders a terminal result — never a silent exit.
             reporter.stage_fail(1,"DISCOVERY_FAILED");reporter.discovery_failure("DISCOVERY_FAILED")
-            _interactive_curl_fallback(url,reporter,auto_code="DISCOVERY_FAILED");return
+            _interactive_curl_fallback(url,reporter,auto_code="DISCOVERY_FAILED",jd_time_budget=jd_time_budget,jd_on_timeout=jd_mode);return
         filename=build_output_filename(url,datetime.now()).removesuffix(".json")+"_discovery.json"
         try:
             runtime_resolution=resolve_encrypted_runtime_terminal(result,generic.discover_terminal,default_registry) if result.probable_list_api is None else None
@@ -743,7 +809,7 @@ def main(
             navigation,stability=stable_navigation(url,generic.discover,default_registry,scope,initial_result=result,deadline_seconds=75)
         except Exception as exc:  # STEP76A2: navigation must surface a terminal result — never a silent exit.
             reporter.stage_fail(1,"DISCOVERY_FAILED");reporter.discovery_failure("DISCOVERY_FAILED")
-            _interactive_curl_fallback(url,reporter,auto_code="DISCOVERY_FAILED");return
+            _interactive_curl_fallback(url,reporter,auto_code="DISCOVERY_FAILED",jd_time_budget=jd_time_budget,jd_on_timeout=jd_mode);return
         handoff=navigation.handoff;result=navigation.terminal_result
         output_path=DISCOVERY_OUTPUT_DIR/filename;output_path.write_text(result.model_dump_json(indent=2),encoding="utf-8")
         if handoff:
@@ -752,7 +818,7 @@ def main(
             return
         if navigation.graph.terminal_reason=="SCOPE_SELECTION_REQUIRED":
             reporter.stage_fail(1,"DISCOVERY_FAILED");reporter.discovery_failure("DISCOVERY_FAILED")
-            _interactive_curl_fallback(url,reporter,auto_code="DISCOVERY_FAILED");return
+            _interactive_curl_fallback(url,reporter,auto_code="DISCOVERY_FAILED",jd_time_budget=jd_time_budget,jd_on_timeout=jd_mode);return
         collection_plan=generic.build_plan(result);validation=CollectionPlanValidator().validate(collection_plan)
         if can_auto_execute_generic(collection_plan,validation,navigation,result):
             scope_count=len(collection_plan.list_scopes) or None
@@ -761,7 +827,7 @@ def main(
             return
         reason="TIMEOUT" if result.status=="TIMEOUT" else "UNSUPPORTED" if collection_plan.mode=="UNSUPPORTED" else "DISCOVERY_FAILED"
         reporter.stage_fail(1,reason);reporter.discovery_failure(reason)
-        _interactive_curl_fallback(url,reporter,auto_code=reason)
+        _interactive_curl_fallback(url,reporter,auto_code=reason,jd_time_budget=jd_time_budget,jd_on_timeout=jd_mode)
         return
 
     reporter=ProgressReporter();reporter.begin(url)

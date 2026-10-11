@@ -36,6 +36,9 @@ Job Extractor
 - **去重** — 跨页重复投递的岗位自动合并，并保留审计记录
 - **浏览器兜底** — JavaScript 渲染的网站自动回退到无头浏览器
 - **手动 cURL 兜底** — 受保护的网站接受从浏览器复制的 cURL 请求
+- **JD 时间预算** — JD 补全阶段的软预算控制，超时后询问或跳过，无人值守运行自动保存
+- **Checkpoint 断点续抓** — 部分完成或中断的采集自动保存检查点，之后只补抓缺失的 JD
+- **五阶段动态进度** — CLI 实时显示各阶段进度、ETA 与等待状态提示
 - **多种导出格式** — 每次运行输出 JSON、CSV、XLSX 和 Markdown 报告
 
 ## AI 工作流
@@ -100,7 +103,9 @@ python main.py "https://example.com/jobs"
 ```bash
 python main.py "URL" --scope campus     # 消歧招聘范围：campus / social / intern / all
 python main.py "URL" --discover         # 只观测并报告疑似岗位 API
-python main.py --list-curl "<curl>" --detail-curl "<curl>"   # 手动 cURL 兜底
+python main.py --list-curl "<curl>" --detail-curl "<curl>"     # 手动 cURL 兜底
+python main.py "URL" --jd-time-budget 600 --jd-on-timeout ask  # JD 阶段软时间预算
+python main.py --resume-checkpoint "output/_checkpoints/<run-id>/jd_checkpoint.json" --detail-curl-file "detail.txt"  # 从检查点补抓缺失 JD
 ```
 
 无需设置 `PYTHONPATH` 或其他环境变量——在仓库根目录直接运行即可。
@@ -238,14 +243,70 @@ output/            # 运行结果（运行时生成）
 main.py            # CLI 入口
 ```
 
+## JD 时间预算
+
+JD 补全阶段有软时间预算（默认 300 秒）：
+
+```bash
+python main.py "URL" --jd-time-budget 600        # 给详情抓取 10 分钟
+python main.py "URL" --jd-on-timeout ask         # 预算到期后询问（或 "skip"）
+```
+
+- 非 TTY（重定向 / 无人值守）运行默认 `skip`：预算到期自动跳过剩余 JD 并保存结果
+- 预算是**软预算**：已启动的请求会安全收束，不会在 300 秒整点强制终止整个进程
+
+## 部分结果与 Checkpoint 续抓
+
+JD 部分未补全时，运行仍会正式导出（状态 `INCOMPLETE`，输出全部五个文件）。在 Manual cURL 路径上，已采集的列表和逐岗位任务状态会自动保存为检查点：
+
+```text
+output/_checkpoints/<run-id>/jd_checkpoint.json
+```
+
+之后只用一份新的有效 Detail cURL 补抓缺失岗位，已成功的岗位保留、不重复抓取：
+
+```bash
+python main.py --resume-checkpoint "output/_checkpoints/<run-id>/jd_checkpoint.json" --detail-curl-file "detail.txt"
+```
+
+- Checkpoint 与 `--resume-checkpoint` **仅在 Manual cURL 路径实现**；自动模式 / 通用引擎不生成检查点
+- 恢复运行需要新的有效 Detail cURL（旧的会话信息可能已过期），并会产生自己的新检查点，可再次续抓
+- `output/_checkpoints/` 不要提交到 Git（已在 `.gitignore` 忽略范围内）
+
+完整恢复流程见 [手动 cURL 指南](docs/MANUAL_CURL.md) 第 16–18 节。
+
+## 运行测试
+
+默认离线测试套件（不发起真实网络请求）：
+
+```bash
+.venv/bin/python -m pytest -q tests/
+```
+
+显式 opt-in 真实站点测试：
+
+```bash
+.venv/bin/python -m pytest -q -m live tests/
+```
+
 ## 局限性
 
 - 不保证支持所有招聘网站——网站结构各不相同且经常变化
 - 页面改版可能导致提取失败，需等待工具更新
 - 部分网站需要手动 cURL 兜底或浏览器辅助采集
 - 受限站点可能以 `COMPLETE` + `LIST_ONLY` 结束——列表完整采集、JD 未批量获取（见 [List-only 站点](#list-only-站点)）
+- `--jd-time-budget` 是软预算，只约束 JD 补全阶段，不保证整个进程在预算时长内退出
+- Checkpoint 与定向续抓仅在 Manual cURL 路径实现
+- 真实外部招聘网站的完整回归（live 测试）在本版本尚未重新验证；默认测试为纯离线
+- Hotjob 自动发现仍可能失败，需要手动 cURL 兜底
 - 本项目**不会**绕过登录、验证码或其他访问控制
 - 目标网站的频率限制和服务条款仍然适用
+
+## Roadmap
+
+- 将软预算 / Checkpoint 续抓能力扩展到 Manual cURL 路径之外
+- 对真实外部招聘网站做完整 live 验证
+- 根据真实站点反馈完善 Release Candidate（见 `docs/releases/` 下发布说明）
 
 ## 安全提醒
 

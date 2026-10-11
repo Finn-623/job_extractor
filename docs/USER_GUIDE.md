@@ -124,6 +124,7 @@ output/
 ```text
 output/
 ├── _failed/
+├── _checkpoints/           ← Manual cURL 部分 JD 未成功或中断时自动保存的恢复检查点（见 MANUAL_CURL.md 第 17 节）
 └── _unknown/
 ```
 
@@ -265,9 +266,24 @@ python main.py "另一个招聘网站URL"
 
 每次运行都会在 `output/` 下生成一个新的时间戳目录，互不影响。
 
-## 16. 如何停止运行
+## 16. 中断、部分结果与恢复
 
-在终端按 **Ctrl + C** 即可中断当前运行。程序会显示中断信息并正常退出；已经抓到的数据是否落盘取决于中断发生的阶段——中断后的目录可能不存在或不完整。
+在终端按 **Ctrl + C** 即可中断当前运行。
+
+- **Manual cURL 的 JD 补全阶段**：中断时程序会自动把已完成的岗位和逐任务状态保存为 Checkpoint（`output/_checkpoints/<run-id>/jd_checkpoint.json`）。之后可用 `--resume-checkpoint` 换一份新的 Detail cURL **只补抓缺失的 JD**，已完成的岗位不会重复抓——具体见 [MANUAL_CURL.md 第 17 节](MANUAL_CURL.md#17-checkpoint-保存与定向续抓)。
+- 其他阶段 / 其他采集路径的中断落盘取决于中断发生的时机：已进入正式导出环节的结果会保留；否则中断后的目录可能不存在或不完整。
+- JD 阶段有时间预算（默认 300 秒，软预算）：预算到期时终端会询问（TTY）或自动跳过（非 TTY），已启动的请求会安全收束后正常保存。
+
+部分 JD 没抓全≠白跑：
+
+| 状态 | 含义 | 结果 |
+|------|------|------|
+| `COMPLETE` | 正式结果完整 | 全部五个文件 |
+| `INCOMPLETE` | 正式结果不完整（如部分 JD 未补全） | **仍然正式导出全部五个文件** |
+| `JD_PARTIAL` / `JD_ABORTED` | Checkpoint 里的阶段标记（部分未成功 / 中断保存） | 不是正式导出状态；可依 `--resume-checkpoint` 恢复 |
+| `FAILED` | 采集未完成 | 仅 `output/_failed/` 下的 error_report.json |
+
+状态详解见 [MANUAL_CURL.md 第 16 节](MANUAL_CURL.md#16-jd-补全状态与结果状态)。
 
 ## 17. 如何更新项目
 

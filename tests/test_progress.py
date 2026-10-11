@@ -121,8 +121,7 @@ def test_job_progress_counter_and_title():
 def test_detail_progress_bar_and_percent():
     rep, sink = make_reporter()
     rep.detail_progress(178, 357, ok=176, fail=2, elapsed=86.0)
-    assert "[██████████░░░░░░░░░░] 178/357  49.9%" in sink.lines
-    assert "成功：176  失败：2" in sink.lines
+    assert "JD 进度：178/357（49.9%）· 成功：176 · 失败：2" in sink.lines
 
 
 # 6 — ETA --------------------------------------------------------------------
@@ -133,11 +132,35 @@ def test_eta_and_clock_format():
     assert fmt_clock(8.94, tenths=True) == "00:08.9"
 
 
+def test_detail_eta_waits_for_recent_sufficient_samples_and_resets_by_phase():
+    rep, _sink = make_reporter(tty=True)
+    rep.stage(4); rep.detail_phase("api_probe", total=574, reset_progress=True)
+    advance(rep, 10.0); rep.detail_progress(1, 574, ok=1)
+    assert "预计剩余：估算中" in "\n".join(rep._live_lines())
+    rep.detail_phase("api_batch", total=574)
+    for done in range(2, 7):
+        advance(rep, 2.5); rep.detail_progress(done, 574, ok=done)
+    assert "预计剩余：估算中" not in "\n".join(rep._live_lines())
+    rep.detail_phase("fallback", total=86, reset_progress=True)
+    assert "预计剩余：估算中" in "\n".join(rep._live_lines())
+
+
+def test_detail_phase_and_stall_are_visible_without_fake_completion():
+    rep, _sink = make_reporter(tty=True)
+    rep.stage(4); rep.detail_phase("api_probe", total=574, reset_progress=True)
+    lines="\n".join(rep._live_lines())
+    assert "正在探测 Detail API" in lines and "0/574" in lines
+    advance(rep, 16)
+    assert "无完成事件" in "\n".join(rep._live_lines())
+    rep.pause_current()
+    assert "等待用户选择下一步" in "\n".join(rep._live_lines())
+
+
 # 7 — success/failed counters -------------------------------------------------
 def test_detail_counters_present():
     rep, sink = make_reporter()
     rep.detail_progress(2, 10, ok=1, fail=1, elapsed=3.0)
-    assert "成功：1  失败：1" in sink.lines
+    assert "成功：1 · 失败：1" in sink.lines[-1]
 
 
 # 8 — error reason translation -------------------------------------------------
@@ -231,6 +254,13 @@ def test_success_summary(tmp_path):
         assert f"- {name}" in joined
 
 
+def test_final_summary_is_emitted_once(tmp_path):
+    rep, sink = make_reporter()
+    rep.success_summary(result(), artifacts(tmp_path))
+    rep.success_summary(result(), artifacts(tmp_path))
+    assert sum("完成 ✓" in line for line in sink.lines)==1
+
+
 def test_success_summary_separates_within_scope_and_cross_scope_duplicates(tmp_path):
     rep, sink = make_reporter()
     rep.success_summary(result(jobs=3, raw_rows=777, duplicate_jobs=0,
@@ -281,7 +311,7 @@ def test_non_tty_append_has_no_ansi():
     joined = "\n".join(sink.lines)
     assert "\x1b[" not in joined and "\r" not in joined
     assert "当前页：1/40" in joined and "当前页：2/40" in joined
-    assert "49.9%" in joined and "成功：176  失败：2" in joined
+    assert "JD 进度：178/357（49.9%）· 成功：176 · 失败：2" in joined
 
 
 def test_jd_updates_produce_one_dynamic_record():

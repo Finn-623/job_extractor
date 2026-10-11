@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -84,7 +85,7 @@ def test_successful_campaign_pattern_is_locked_for_next_job():
     from job_extractor.collectors.detail_resolver import DetailTarget
     seen=[]
     class FakePage:
-        def goto(self, url, wait_until=None): self.url=url; seen.append(url)
+        def goto(self, url, wait_until=None, timeout=None): self.url=url; seen.append(url)
         def evaluate(self, *_a, **_k): return CREDIBLE_JD if "/pos?" in self.url else "加载中"
         def close(self): pass
     # The first candidate is intentionally not the working route.  The first
@@ -98,7 +99,7 @@ def test_successful_campaign_pattern_is_locked_for_next_job():
 
 def test_detail_candidate_total_budget_caps_a_failed_target():
     class FakePage:
-        def goto(self, url, wait_until=None): pass
+        def goto(self, url, wait_until=None, timeout=None): pass
         def evaluate(self, *_a, **_k): return "加载中"
         def close(self): pass
     target=resolve_targets([_job("1")], LIST_URL).targets[0]
@@ -112,7 +113,7 @@ def test_manual_batch_uses_the_same_campaign_resolver_pipeline():
     from job_extractor.manual_curl import run_manual_curl
     visited=[]
     class FakePage:
-        def goto(self, url, wait_until=None): visited.append(url)
+        def goto(self, url, wait_until=None, timeout=None): visited.append(url)
         def evaluate(self, *_a, **_k): return CREDIBLE_JD
         def close(self): pass
     with _manual_client() as client:
@@ -128,7 +129,7 @@ def test_manual_cli_wiring_uses_list_referer_as_campaign_context():
     from job_extractor.manual_curl import run_manual_curl
     visited=[]
     class FakePage:
-        def goto(self, url, wait_until=None): visited.append(url)
+        def goto(self, url, wait_until=None, timeout=None): visited.append(url)
         def evaluate(self, *_a, **_k): return CREDIBLE_JD
         def close(self): pass
     curl=LIST_CURL + " -H 'Referer: https://skyworth.hotjob.cn/SU/pb/school.html'"
@@ -162,7 +163,7 @@ def test_rendered_page_success_extracts_jd_sections():
           "沪ICP备10000326号-6\n粤公网安备 44030002000001号")
     class FakePage:
         def __init__(self): self.calls=0
-        def goto(self, url, wait_until=None): self.url=url; assert f"postId={SKYWORTH_POST_ID}" in url
+        def goto(self, url, wait_until=None, timeout=None): self.url=url; assert f"postId={SKYWORTH_POST_ID}" in url
         def evaluate(self, *_a, **_k):
             self.calls+=1
             return text if self.calls>=2 else "加载中"
@@ -184,7 +185,7 @@ def test_rendered_page_success_extracts_jd_sections():
 # ⑤ render timeout → no JD merge, failure counted
 def test_render_timeout_returns_error_without_merge():
     class FakePage:
-        def goto(self, url, wait_until=None): pass
+        def goto(self, url, wait_until=None, timeout=None): pass
         def evaluate(self, *_a, **_k): return "加载中"
         def close(self): pass
     outcome=fetch_rendered_jd(FakePage(), LIST_URL, timeout_s=0.4, poll_interval_s=0.1)
@@ -194,6 +195,50 @@ def test_render_timeout_returns_error_without_merge():
     succeeded, failed=render_detail_jobs(lambda: FakePage(), [target], timeout_s=0.4, poll_interval_s=0.1)
     assert (succeeded, failed)==(0, 1)
     assert job.full_jd is None
+
+
+def test_navigation_timeout_uses_milliseconds_and_allows_other_jobs_to_finish():
+    class NavigationTimeout(Exception): pass
+    seen_timeouts=[]; timed_out_closed=[]
+    class TimedOutPage:
+        def goto(self, url, wait_until=None, timeout=None):
+            seen_timeouts.append(timeout)
+            raise NavigationTimeout("navigation timed out")
+        def close(self): timed_out_closed.append(True)
+    outcome=fetch_rendered_jd(TimedOutPage(), LIST_URL, timeout_s=1.25)
+    assert outcome["ok"] is False and outcome["error"]=="NAVIGATION_TIMEOUT"
+    assert seen_timeouts==[1250]
+
+    first,second=resolve_targets([_job("1"),_job("2")], LIST_URL).targets
+    closed=[]
+    class SuccessfulPage:
+        def goto(self, url, wait_until=None, timeout=None): self.url=url
+        def evaluate(self, *_a, **_k): return CREDIBLE_JD
+        def close(self): closed.append(True)
+    pages=iter((TimedOutPage(),SuccessfulPage()))
+    progress=[]
+    assert render_detail_jobs(lambda: next(pages), [first,second], concurrency=1,
+                              timeout_s=.2, progress_callback=lambda event, **data: progress.append(data))==(1,1)
+    assert first.job.full_jd is None and second.job.full_jd
+    assert len(progress)==2 and progress[-1]["done"]==2
+    assert timed_out_closed==[True]
+    assert closed==[True]
+
+
+def test_render_budget_stops_new_targets_and_preserves_completed_jd():
+    first,second=resolve_targets([_job("1"),_job("2")], LIST_URL).targets
+    class FakePage:
+        def goto(self, url, wait_until=None, timeout=None): self.url=url
+        def evaluate(self, *_a, **_k): return CREDIBLE_JD
+        def close(self): pass
+    starts=iter((True,False))
+    progress=[]
+    assert render_detail_jobs(lambda: FakePage(),[first,second],concurrency=1,
+                              should_start=lambda:next(starts),
+                              progress_callback=lambda _event,**data:progress.append(data))==(1,1)
+    assert first.job.full_jd and second.job.full_jd is None
+    assert second.failure_code=="JD_TIME_BUDGET_SKIPPED"
+    assert progress[-1]["done"]==2 and progress[-1]["fail"]==1
 
 # ⑥ footer noise / missing sections → missing JD
 def test_footer_noise_only_text_yields_no_jd():
@@ -227,6 +272,25 @@ def test_auto_fail_raises_detail_curl_required_with_list_context():
     targets=[t for t in exc.resolution.targets if t.method=="RENDERED_PAGE"]
     assert targets and all(t.detail_urls for t in targets)
 
+
+def test_expected_detail_escalation_keeps_checkpoint_states_and_final_progress(tmp_path, monkeypatch):
+    """The menu escalation is partial work, never an aborted empty-state run."""
+    events=[]
+    monkeypatch.setattr("job_extractor.collectors.detail_resolver.render_detail_jobs",
+                        lambda _factory, targets, **_kwargs: (0, len(targets)))
+    with _manual_client() as client:
+        with pytest.raises(DetailCurlRequired) as excinfo:
+            run_manual_curl(LIST_CURL, None, max_jobs=None, client=client,
+                            checkpoint_root=tmp_path, detail_browser_factory=lambda: object(),
+                            progress_callback=lambda event, **data: events.append((event, data)))
+    exc=excinfo.value
+    payload=json.loads(Path(exc.context["checkpoint_path"]).read_text(encoding="utf-8"))
+    assert payload["stage"] == "JD_PARTIAL"
+    assert payload["task_states"] == {"1":"FAILED", "2":"FAILED", "3":"FAILED"}
+    assert exc.task_states == payload["task_states"]
+    final=[data for event,data in events if event == "detail"][-1]
+    assert final["done"] == final["total"] == 3 and final["ok"] == 0 and final["fail"] == 3
+
 # ⑧ List-only choice — the exception's carried list becomes a legal result
 def test_list_only_choice_produces_legal_complete_result():
     from job_extractor.manual_curl import ManualCurlResult, manual_result_to_collection_result
@@ -253,7 +317,7 @@ def test_partial_render_success_and_remaining_failure():
     good=(_job("1"), True)
     class FakePage:
         def __init__(self, ok): self.ok=ok
-        def goto(self, url, wait_until=None): pass
+        def goto(self, url, wait_until=None, timeout=None): pass
         def evaluate(self, *_a, **_k):
             return CREDIBLE_JD if self.ok else "页面加载异常"
         def close(self): pass

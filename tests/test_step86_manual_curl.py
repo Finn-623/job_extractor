@@ -70,6 +70,20 @@ def test_batch_merges_list_ids_and_generic_jd_aliases():
     assert len(result.jobs)==5 and result.failed_details==0
     assert result.jobs[0].job_id=="1" and result.jobs[0].responsibilities and result.jobs[0].requirements
 
+
+def test_zero_jd_budget_skips_unstarted_detail_requests_but_keeps_list_jobs():
+    calls=[]
+    def handler(request):
+        calls.append(str(request.url))
+        if "/jobs" in str(request.url):
+            return httpx.Response(200,json={"data":[{"id":"1","jobName":"岗位1"}],"page":{"totalCount":1}})
+        return httpx.Response(200,json={"data":{"positionInfoList":[{"jobDuty":"不应请求","jobRequirements":"不应请求"}]}})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result=run_manual_curl(LIST,DETAIL,max_jobs=None,client=client,jd_time_budget=0)
+    assert len(result.jobs)==1 and result.jobs[0].job_title=="岗位1"
+    assert result.failed_detail_reasons==[("1","JD_TIME_BUDGET_SKIPPED")]
+    assert len(calls)==1
+
 def test_list_with_complete_jd_is_list_sufficient_without_detail_curl():
     rows=[{"id":"1","jobName":"岗位1","workPlace":"深圳","jobDuty":"负责系统设计与交付，推动跨团队协作。","jobRequirements":"本科及以上，具备工程实践能力。"},{"id":"2","jobName":"岗位2","workPlace":"深圳","jobDuty":"负责服务稳定性建设与交付。","jobRequirements":"本科及以上，具备工程实践能力。"}]
     client=httpx.Client(transport=httpx.MockTransport(lambda _request:httpx.Response(200,json={"data":rows,"page":{"totalCount":2}})))
@@ -171,8 +185,11 @@ def test_explicit_curl_file_bypasses_url_discovery(monkeypatch,tmp_path):
     manual=ManualCurlResult("data",1,22,"HIGH",[job],0,1,1,[],"COMPLETE","TOTAL_REACHED",0.1,1)
     list_file=tmp_path/"list.txt";detail_file=tmp_path/"detail.txt"
     list_file.write_text(LIST,encoding="utf-8");detail_file.write_text(DETAIL,encoding="utf-8")
-    monkeypatch.setattr(cli,"run_manual_curl",lambda *_args,**_kwargs:manual)
+    received={}
+    def fake_run(*_args,**kwargs): received.update(kwargs); return manual
+    monkeypatch.setattr(cli,"run_manual_curl",fake_run)
     monkeypatch.setattr(cli.default_registry,"detect",lambda _url:(_ for _ in ()).throw(AssertionError("discovery invoked")))
     monkeypatch.setattr(cli,"generate_and_render_reports",lambda result,*_args:"UNIFIED "+result.status)
-    output=CliRunner().invoke(cli.app,["https://entry.test","--list-curl-file",str(list_file),"--detail-curl-file",str(detail_file)])
+    output=CliRunner().invoke(cli.app,["https://entry.test","--list-curl-file",str(list_file),"--detail-curl-file",str(detail_file),"--jd-time-budget","120","--jd-on-timeout","skip"])
     assert output.exit_code==0 and "完成 ✓" in output.output
+    assert received["jd_time_budget"]==120 and received["jd_timeout_handler"]()=="skip"

@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import unicodedata
+from collections import deque
 from typing import Any, Callable
 
 from job_extractor.debug_trace import set_sink as set_debug_trace_sink
@@ -129,6 +130,13 @@ class ProgressReporter:
         self.errors: list[dict[str, Any]] = []
         self.artifacts: Any | None = None  # set by cli after reports (run dir + files)
         self._t0: float | None = None
+        self._last_detail_log = 0
+        # ETA is based on recent completions, not the whole stage.  The first
+        # request often includes connection/probe cost and is not predictive.
+        self._detail_samples: deque[tuple[int, float]] = deque(maxlen=12)
+        self._last_progress_at: float | None = None
+        self._jd_phase: str | None = None
+        self._summary_emitted = False
         # Internal diagnostics (SCOPE_TRACE/TIMING_TRACE...) render through this
         # reporter in trace mode so they can pause the board instead of being
         # clobbered by an in-place frame refresh (default runs never emit them).
@@ -249,6 +257,7 @@ class ProgressReporter:
         self.stop_heartbeat()
         self.current = None
         self.terminal = False
+        self.reset_final_summary()  # N7A: a fallback switch is a recovery, the final summary must still fire
         self.states[0] = "done"
         self._stage_note[1] = "已切换至 cURL 兜底"
         if self.stage_elapsed[0] is None:
@@ -274,6 +283,54 @@ class ProgressReporter:
             if note:
                 for line in note.split("\n"):self._emit(f"      {line}")
         else:self._refresh()
+
+    def pause_current(self) -> None:
+        """Stop live repaint while the CLI is waiting for a user decision.
+
+        The stage deliberately remains active so a later detail-cURL choice can
+        resume it, or stage(5) can close it as a partial collection.
+        """
+        self.stop_heartbeat()
+        self._live.update(activity="等待用户选择下一步…", waiting=True)
+        if self._tty:
+            self._refresh()
+
+    def resume_current(self) -> None:
+        self._live["waiting"] = False
+        if self.current is not None and self._tty:
+            self._start_heartbeat()
+
+    def detail_phase(self, phase: str, *, total: int | None = None,
+                     activity: str | None = None, draining: int | None = None,
+                     reset_progress: bool = False) -> None:
+        """Declare a low-frequency JD sub-stage without inventing progress."""
+        labels={"api_probe":"正在探测 Detail API…", "api_batch":"正在并发获取 Detail API…",
+                "fallback":"正在浏览器回退获取 JD…", "budget_draining":"预算已到，正在收束已启动任务…",
+                "waiting_input":"等待用户选择下一步…"}
+        changed=phase != self._jd_phase
+        self._jd_phase=phase
+        if changed:
+            self._detail_samples.clear()
+        self._last_progress_at=self._clock()
+        self._live.update(activity=activity or labels.get(phase,"正在完善岗位 JD…"),
+                          waiting=(phase=="waiting_input"), draining=draining)
+        if total is not None and reset_progress:
+            self._live.update(got=0,done=0,total=total,ok=0,fail=0,counts=True,title=None)
+        elif total is not None:
+            self._live["total"] = total
+        if self._tty:self._refresh()
+
+    def _detail_eta(self) -> float | None:
+        if self._live.get("waiting") or len(self._detail_samples)<5:
+            return None
+        first_done,first_at=self._detail_samples[0]; last_done,last_at=self._detail_samples[-1]
+        span=last_at-first_at; completed=last_done-first_done
+        if span<10.0 or completed<=0:
+            return None
+        if self._last_progress_at is None or self._clock()-self._last_progress_at>=15.0:
+            return None
+        total=self._live.get("total") or 0
+        return max(0.0,(total-last_done)/(completed/span))
 
     def note(self, n: int, text: str) -> None:
         self._stage_note[n] = text
@@ -329,9 +386,17 @@ class ProgressReporter:
                 lines.append(f"当前：{L['title']}")
             if L.get("counts"):
                 lines.append(f"成功：{L['ok']}  失败：{L['fail']}")
+            if L.get("activity"):
+                lines.append(str(L["activity"]))
             lines.append(f"已用时：{fmt_clock(elapsed)}")
-            eta = self.eta(elapsed, done, total)
-            lines.append(f"预计剩余：{fmt_clock(eta) if (done > 0 and eta is not None) else '计算中...'}")
+            eta = self._detail_eta() if self._jd_phase else self.eta(elapsed, done, total)
+            lines.append(f"预计剩余：{fmt_clock(eta) if eta is not None else '估算中'}")
+            if self._last_progress_at is not None and not L.get("waiting"):
+                stalled=self._clock()-self._last_progress_at
+                if stalled>=15.0:
+                    lines.append(f"已 {fmt_clock(stalled)} 无完成事件；{L.get('activity') or '仍在处理中'}")
+            if L.get("draining") is not None:
+                lines.append(f"已启动待收束任务：{L['draining']}")
             return lines
         # unknown-total mode (spec B/G): spinner + elapsed, never a fake %/ETA
         sp = SPINNER[self._frame % len(SPINNER)]
@@ -380,19 +445,20 @@ class ProgressReporter:
 
     def detail_progress(self, done: int, total: int, ok: int = 0, fail: int = 0,
                         title: str | None = None, elapsed: float | None = None) -> None:
+        prior=self._live.get("done")
+        now=self._clock()
+        if prior is None or done > prior:
+            self._detail_samples.append((done,now)); self._last_progress_at=now
         self._live.update(got=done, done=done, total=total, ok=ok, fail=fail,
                           title=title, counts=True)
         self._err_flash = False
         self._stage_note[4] = f"完整：{ok} · 失败：{fail}"
         if not self._tty:
+            step=max(1, total//10) if total else 1
+            if done not in {1,total} and done-self._last_detail_log < step:return
+            self._last_detail_log=done
             pct = (done / total * 100) if total else 0.0
-            self._emit(f"[{progress_bar(done, total)}] {done}/{total}  {pct:.1f}%")
-            if title:
-                self._emit(f"当前：{title}")
-            self._emit(f"成功：{ok}  失败：{fail}")
-            self._emit(f"已用时：{fmt_clock(elapsed if elapsed is not None else self._stage_elapsed_now())}")
-            eta = self.eta(elapsed if elapsed is not None else self._stage_elapsed_now(), done, total)
-            self._emit(f"预计剩余：{fmt_clock(eta) if (done > 0 and eta is not None) else '计算中...'}")
+            self._emit(f"JD 进度：{done}/{total}（{pct:.1f}%）· 成功：{ok} · 失败：{fail}" + (f" · 当前：{title}" if title else ""))
             return
         self._refresh()
 
@@ -432,7 +498,18 @@ class ProgressReporter:
         return lines
 
     # -- summaries ---------------------------------------------------------
+    def reset_final_summary(self) -> None:
+        """Re-arm the final summary after an intermediate failure recovers.
+
+        N7A: a mid-run failure (e.g. the pasted cURL was rejected, then the
+        user re-pasted a working one) legitimately emits one failure summary
+        and later one final success summary — that is a recovery, not a
+        duplicate of the same terminal outcome."""
+        self._summary_emitted = False
+
     def success_summary(self, result, artifacts, extra_files: list[str] | None = None) -> None:
+        if self._summary_emitted:return
+        self._summary_emitted = True
         m = result.metrics
         preferred=["jobs.json","jobs.xlsx","jobs.csv","collection.json","report.md"]
         actual=set(extra_files or [])
@@ -481,6 +558,11 @@ class ProgressReporter:
             self._emit("岗位列表可交给 ChatGPT/AI 初筛；感兴趣岗位再到官网查看 JD")
         if getattr(result, "enrichment", {}).get("fallback", {}).get("fallback_method") == "curl":
             self._emit("数据获取方式：cURL 兜底")
+        resume_stats = getattr(result, "enrichment", {}).get("resume_stats")
+        if resume_stats:
+            self._emit(
+                "续抓统计：原有可信 JD {preexisting} · 本次请求 {requested} · "
+                "本次新增成功 {new_success} · 本次失败 {failed} · 本次跳过 {skipped} · 仍缺 JD {still_missing}".format(**resume_stats))
         self._emit("")
         self._emit(f"输出：\n{display}/" if display else "输出：")
         self._emit("文件：")
@@ -488,6 +570,8 @@ class ProgressReporter:
             self._emit(f"- {f}")
 
     def failed_summary(self, stage: int, reason: str, errors: list[str] | None = None) -> None:
+        if self._summary_emitted:return
+        self._summary_emitted = True
         self._emit("")
         self._emit("抓取失败 ✗")
         self._emit("")

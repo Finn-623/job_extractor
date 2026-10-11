@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -426,14 +426,16 @@ def fetch_rendered_jd(page: Any, url: str, *, timeout_s: float = 20.0,
     ``page`` is a Playwright-like page (goto/evaluate). ``extract_text``
     overrides the DOM text source (tests inject fake pages this way).
     Readiness: rendered text length + credible JD sections, polled — never a
-    fixed sleep, never a wait past ``timeout_s``.
+    fixed sleep, never a wait past ``timeout_s``. The same budget is passed
+    to Playwright in milliseconds for navigation; it bounds that operation as
+    far as the browser runtime supports, rather than forcing thread cancellation.
     """
     extract_text = extract_text or (lambda: page.evaluate("() => document.body ? document.body.innerText : ''"))
     diagnostic = diagnostic if diagnostic is not None else {}
     diagnostic.update(candidate_url=url, navigation_wait="domcontentloaded", navigation_start=time.monotonic(),
                       goto_started=time.monotonic()-diagnostic.get("resolver_started", time.monotonic()))
     try:
-        page.goto(url, wait_until="domcontentloaded")
+        page.goto(url, wait_until="domcontentloaded", timeout=max(1, int(timeout_s * 1000)))
     except Exception as exc:
         diagnostic.update(navigation_elapsed=time.monotonic()-diagnostic["navigation_start"],
                           final_page_url=getattr(page,"url",None), failure_stage="NAVIGATION",
@@ -507,7 +509,8 @@ def render_detail_jobs(page_factory: Callable[[], Any], targets: list[DetailTarg
                        total_timeout_s: float = 25.0,
                        poll_interval_s: float = 0.5,
                        progress_callback: Callable | None = None,
-                       debug_context: dict | None = None) -> tuple[int, int]:
+                       debug_context: dict | None = None,
+                       should_start: Callable[[], bool] | None = None) -> tuple[int, int]:
     """Execute RENDERED_PAGE targets against a browser page factory.
 
     Conservative concurrency (default 2, capped at 4). Each worker gets a
@@ -627,26 +630,41 @@ def render_detail_jobs(page_factory: Callable[[], Any], targets: list[DetailTarg
             except Exception:
                 pass
 
-    workers = max(1, min(concurrency, 4))
+    workers = max(1, min(concurrency, 4)); pending = iter(work); stopped = False
+    def record(target: DetailTarget, ok: bool) -> None:
+        nonlocal done, succeeded, failed
+        with lock:
+            done += 1
+            if ok: succeeded += 1
+            else: failed += 1
+            if progress_callback:
+                progress_callback("detail", done=done, total=len(work), ok=succeeded,
+                                  fail=failed, title=getattr(target.job, "job_title", ""),
+                                  post_id=target.id_value, failure_code=target.failure_code,
+                                  failure_reason=target.failure_reason)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(one, target): target for target in work}
-        for future in as_completed(futures):
-            target = futures[future]
-            ok = bool(future.result())
-            with lock:
-                done += 1
-                if ok:
-                    succeeded += 1
-                else:
-                    failed += 1
-                if progress_callback:
-                    progress_callback("detail", done=done, total=len(work), ok=succeeded,
-                                      fail=failed, title=getattr(target.job, "job_title", ""),
-                                      post_id=target.id_value, failure_code=target.failure_code,
-                                      failure_reason=target.failure_reason)
-                    if debug_context is not None and done <= 2:
-                        progress_callback("detail_debug", title=getattr(target.job,"job_title",""), post_id=target.id_value,
-                                          detail=diagnostic)
+        futures: dict[Any, DetailTarget] = {}
+        while True:
+            while not stopped and len(futures) < workers:
+                if should_start is not None and not should_start():
+                    stopped = True; break
+                try: target = next(pending)
+                except StopIteration: break
+                futures[pool.submit(one, target)] = target
+            if not futures: break
+            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in completed:
+                target = futures.pop(future)
+                record(target, bool(future.result()))
+                if debug_context is not None and done <= 2 and progress_callback:
+                    progress_callback("detail_debug", title=getattr(target.job,"job_title",""), post_id=target.id_value,
+                                      detail=diagnostic)
+            if stopped: continue
+        if stopped:
+            for target in pending:
+                target.failure_code = "JD_TIME_BUDGET_SKIPPED"
+                target.failure_reason = target.failure_code
+                record(target, False)
     # Direct callers (including the live CLI) receive the same audit state as
     # callers that wrap this function in Manual cURL orchestration.
     resolutions = {id(target.resolution): target.resolution for target in work if target.resolution is not None}
